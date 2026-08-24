@@ -1,4 +1,3 @@
-// v2
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { loadKey, saveKey, keyExists } from "./storage.js";
 import { RECIPES as REPO_RAW } from "./data/index.js";
@@ -1866,7 +1865,7 @@ function SwipeCard({ card, index, onSwipe, topId, isLast, unlock }) {
                 {card.custom && <span style={pill(C.gold, "#fff")}>🏠 custom</span>}
               </div>
             </div>
-            <div ref={scrollEl} style={{ padding: "10px 16px 14px", flex: 1, display: "flex", flexDirection: "column", gap: 6, overflowY: "auto", WebkitOverflowScrolling: "touch" }}>
+            <div ref={scrollEl} style={{ padding: "10px 16px 14px", flex: 1, display: "flex", flexDirection: "column", gap: 6, overflowY: "auto", touchAction: "none" }}>
               <p style={{ margin: 0, color: C.faint, fontSize: 13.5, lineHeight: 1.4, flexShrink: 0 }}>{card.desc}</p>
               {card.rescues?.length > 0 && (
                 <div style={{ background: C.goldSoft, borderRadius: 10, padding: "6px 10px", fontSize: 12, fontWeight: 700, color: "#9A6700", flexShrink: 0 }}>
