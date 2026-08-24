@@ -262,6 +262,85 @@ let uidCounter = 0;
 const uid = () => Date.now() + "-" + (uidCounter++);
 
 /* ==================================================================
+   Cuisine similarity
+
+   Derived from the repository's own ingredients rather than a
+   hand-written table, so it stays correct as recipes are added and
+   encodes what the food actually shares rather than someone's guess.
+
+   Each cuisine becomes a vector over its core ingredients, TF-IDF
+   weighted: an ingredient present in every cuisine (onion, salt) says
+   nothing about identity, while one confined to a few (gochujang,
+   berbere, tamarind) says a great deal. Cosine similarity between two
+   vectors is then "how alike do these two cuisines cook".
+
+   Computed once at module load — 31 cuisines is a trivial matrix.
+   ================================================================== */
+const CUISINE_SIM = (() => {
+  const profile = {}, recipeCount = {};
+  for (const r of REPO) {
+    const c = (r.cuisine || "").toLowerCase();
+    if (!c) continue;
+    recipeCount[c] = (recipeCount[c] || 0) + 1;
+    profile[c] = profile[c] || {};
+    for (const ing of r.ingredients || []) {
+      const k = norm(ing);
+      profile[c][k] = (profile[c][k] || 0) + 1;
+    }
+  }
+  const names = Object.keys(profile);
+  const docFreq = {};
+  for (const c of names) for (const k of Object.keys(profile[c])) docFreq[k] = (docFreq[k] || 0) + 1;
+
+  const vec = {};
+  for (const c of names) {
+    const v = {};
+    let mag = 0;
+    for (const [k, f] of Object.entries(profile[c])) {
+      const w = (f / recipeCount[c]) * Math.log(names.length / docFreq[k]);
+      if (w > 0) { v[k] = w; mag += w * w; }
+    }
+    mag = Math.sqrt(mag) || 1;
+    for (const k of Object.keys(v)) v[k] /= mag;
+    vec[c] = v;
+  }
+
+  const sim = {};
+  for (const a of names) {
+    sim[a] = {};
+    for (const b of names) {
+      if (a === b) continue;
+      let dot = 0;
+      for (const [k, w] of Object.entries(vec[a])) if (vec[b][k]) dot += w * vec[b][k];
+      sim[a][b] = dot;
+    }
+  }
+  return { names, sim, count: recipeCount };
+})();
+
+// Cuisines ranked by similarity to `cuisine`, closest first.
+const rankedByCloseness = (cuisine) => {
+  const row = CUISINE_SIM.sim[cuisine];
+  if (!row) return [];
+  return Object.entries(row).sort((a, b) => b[1] - a[1]).map(([c]) => c);
+};
+
+// Cuisines least like everything in `rejected`, furthest first.
+//
+// Scored on the worst case — a candidate is only "far" if it is far from
+// EVERY rejected cuisine, otherwise after rejecting Thai and Italian we could
+// serve Vietnamese on the grounds that it is unlike Italian.
+const furthestFrom = (rejected) => {
+  const from = [...new Set(rejected.filter((c) => CUISINE_SIM.sim[c]))];
+  if (!from.length) return [];
+  return CUISINE_SIM.names
+    .filter((c) => !from.includes(c))
+    .map((c) => [c, Math.max(...from.map((r) => CUISINE_SIM.sim[r][c] ?? 0))])
+    .sort((a, b) => a[1] - b[1])
+    .map(([c]) => c);
+};
+
+/* ==================================================================
    Deck selection
 
    Picks the next `count` cards. Two stages: score every candidate,
@@ -269,9 +348,55 @@ const uid = () => Date.now() + "-" + (uidCounter++);
    built from penalties and bonuses — lower tier is better, and score
    is its negation plus jitter, so higher score wins.
    ================================================================== */
+// Reads the tail of the swipe history and says how the deck should behave.
+//
+//   3 consecutive lefts  -> explore: jump to cuisines unlike what was rejected
+//   1+ consecutive rights -> exploit: close in on what was liked, tightening
+//                            with each further right swipe
+//
+// The tightening is deliberately gradual. One right swipe is weak evidence, so
+// it reaches for the second-closest cuisine; a run of them is strong evidence,
+// so it converges on the closest.
+const LEFT_STREAK_TO_JUMP = 3;
+function readMood(swipes) {
+  let rights = 0, lefts = 0;
+  for (let i = swipes.length - 1; i >= 0; i--) {
+    if (swipes[i].dir === "right") { if (lefts) break; rights++; }
+    else { if (rights) break; lefts++; }
+  }
+  const recent = (n, dir) => swipes.filter((s) => s.dir === dir).slice(-n).map((s) => (s.cuisine || "").toLowerCase()).filter(Boolean);
+  if (rights > 0) {
+    // depth 1 -> second-closest, 2 -> closest, 3+ -> closest and stay there
+    return { mode: "exploit", depth: rights, seeds: recent(3, "right") };
+  }
+  if (lefts >= LEFT_STREAK_TO_JUMP) {
+    return { mode: "explore", depth: lefts, seeds: recent(LEFT_STREAK_TO_JUMP, "left") };
+  }
+  return { mode: "neutral", depth: 0, seeds: [] };
+}
+
 function pickFromRepo(recipes, { pantry, staples, mode, exclude, swipes, cuisines = [], maxTime = null, mealType = null, count = 5 }) {
   const liked = new Set(swipes.filter((s) => s.dir === "right").map((s) => (s.cuisine || "").toLowerCase()));
   const passed = new Set(swipes.filter((s) => s.dir === "left").map((s) => (s.cuisine || "").toLowerCase()));
+
+  // Explore/exploit steering, unless a manual cuisine filter is already
+  // deciding what the deck shows.
+  const mood = cuisines.length ? { mode: "neutral", depth: 0, seeds: [] } : readMood(swipes);
+  const steer = {};
+  if (mood.mode === "explore") {
+    // Far cuisines get the bonus; the ones just rejected are pushed away hard.
+    const far = furthestFrom(mood.seeds).filter((c) => (CUISINE_SIM.count[c] || 0) >= 5);
+    far.slice(0, 8).forEach((c, i) => { steer[c] = -60 + i * 5; });
+    for (const c of mood.seeds) steer[c] = (steer[c] || 0) + 80;
+  } else if (mood.mode === "exploit") {
+    // depth 1 favours the second-closest, depth 2+ the closest.
+    for (const seed of mood.seeds) {
+      const near = rankedByCloseness(seed);
+      const order = mood.depth === 1 ? [near[1], near[0], near[2]] : [near[0], near[1], near[2]];
+      order.forEach((c, i) => { if (c) steer[c] = (steer[c] || 0) - (45 - i * 12); });
+      steer[seed] = (steer[seed] || 0) - (mood.depth >= 2 ? 30 : 10);
+    }
+  }
   const wanted = new Set(cuisines.map((c) => c.toLowerCase()));
   // Time-of-day meal preference (device local time, soft boost)
   const hr = new Date().getHours();
@@ -296,6 +421,8 @@ function pickFromRepo(recipes, { pantry, staples, mode, exclude, swipes, cuisine
       // Mood: cuisine preferences from swipe history
       if (liked.has(cz)) tier -= 10;
       if (passed.has(cz) && !liked.has(cz)) tier += 10;
+      // Explore/exploit steering (0 when neither is active)
+      tier += steer[cz] || 0;
       // Rescue bonus for use-soon items
       if (c.fit.rescues.length) tier -= 5;
       // Time-of-day: boost matching meal type when no manual meal filter is set
