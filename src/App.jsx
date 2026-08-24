@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { loadKey, saveKey, keyExists, syncConfigured, SyncError } from "./storage.js";
+import { loadKey, saveKey, keyExists, syncConfigured, configError, SyncError } from "./storage.js";
 import { RECIPES as REPO_RAW } from "./data/index.js";
 
 const COMMUNITY_KEY = "simmer-community-recipes";
@@ -835,8 +835,10 @@ function HouseholdPanel({ code, poolCount, syncError, onCreate, onJoin, onLeave,
             background: C.redSoft, color: C.red, borderRadius: 10, padding: "10px 12px",
             fontSize: 13, fontWeight: 600, margin: "0 0 12px", lineHeight: 1.45,
           }}>
-            Household sync isn't set up for this build — nothing will be shared.
-            Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in Vercel, then redeploy.
+            {configError
+              ? `Household sync is misconfigured — nothing will be shared. ${configError}`
+              : "Household sync isn't set up for this build — nothing will be shared. " +
+                "Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in Vercel, then redeploy."}
           </p>
         )}
 

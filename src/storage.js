@@ -3,7 +3,34 @@ import { createClient } from "@supabase/supabase-js";
 const url = import.meta.env.VITE_SUPABASE_URL;
 const anon = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-export const supabase = url && anon ? createClient(url, anon) : null;
+// A legacy anon key is a JWT whose payload carries the project ref it was
+// issued for. That makes a mistyped URL detectable offline: if the host's
+// subdomain and the key's `ref` disagree, every request would go to a
+// project that isn't ours (or, for a typo'd host, nowhere at all).
+// Modern sb_publishable_ keys aren't JWTs — skip the check for those.
+function refMismatch(u, key) {
+  const host = /^https:\/\/([a-z0-9]+)\.supabase\.co\/?$/.exec((u || "").trim());
+  if (!host) return `VITE_SUPABASE_URL doesn't look like a Supabase project URL: ${u}`;
+  const parts = (key || "").split(".");
+  if (parts.length !== 3) return null; // not a JWT; nothing to cross-check
+  let claimed;
+  try {
+    const pad = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    claimed = JSON.parse(atob(pad + "=".repeat((4 - (pad.length % 4)) % 4))).ref;
+  } catch {
+    return null; // unreadable payload isn't itself proof of a mismatch
+  }
+  if (!claimed || claimed === host[1]) return null;
+  return (
+    `VITE_SUPABASE_URL points at project "${host[1]}", but the anon key was ` +
+    `issued for "${claimed}". One of them is mistyped — the key's project is ` +
+    `the authoritative one.`
+  );
+}
+
+export const configError = url && anon ? refMismatch(url, anon) : null;
+
+export const supabase = url && anon && !configError ? createClient(url, anon) : null;
 
 // Whether this build can talk to Supabase at all. When false, every shared
 // read/write throws instead of pretending to succeed — a household created
@@ -11,6 +38,7 @@ export const supabase = url && anon ? createClient(url, anon) : null;
 export const syncConfigured = !!supabase;
 
 const NOT_CONFIGURED =
+  configError ||
   "Household sync isn't set up for this build. VITE_SUPABASE_URL and " +
   "VITE_SUPABASE_ANON_KEY need to be set in Vercel, then redeploy.";
 
