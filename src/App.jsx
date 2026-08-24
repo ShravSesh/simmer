@@ -130,6 +130,10 @@ const nsKeys = (code) => ({
   // Cook history. Separate from matches on purpose: clearing matches must not
   // erase the record of what was actually cooked.
   cooked: code ? `hh:${code}:cooked` : "simmer-cooked",
+  // User edits to the quick-add catalogue: {add:[names], hide:[names]}.
+  // Stored as edits rather than a full list so the built-in suggestions can
+  // still grow in future releases without overwriting anyone's changes.
+  quick: code ? `hh:${code}:quick-add` : "simmer-quick-add",
 });
 
 /* ==================================================================
@@ -404,6 +408,7 @@ export default function Simmer() {
   const [stockCounts, setStockCounts] = useState({});
   const [community, setCommunity] = useState([]);
   const [cooked, setCooked] = useState([]);
+  const [quickEdits, setQuickEdits] = useState({ add: [], hide: [] });
   const [recipeSheet, setRecipeSheet] = useState(false);
   const [favSheet, setFavSheet] = useState(false);
   const [cookedSheet, setCookedSheet] = useState(false);
@@ -438,6 +443,7 @@ export default function Simmer() {
   const profileRef = useRef(profile); profileRef.current = profile;
   const shoppingRef = useRef(shopping); shoppingRef.current = shopping;
   const cookedRef = useRef(cooked); cookedRef.current = cooked;
+  const quickEditsRef = useRef(quickEdits); quickEditsRef.current = quickEdits;
 
   // Which namespace the in-memory state was actually loaded from: a household
   // code, or null for solo. `undefined` means nothing has loaded yet. Writes
@@ -449,13 +455,14 @@ export default function Simmer() {
   // alternative (falling back to empty) is what used to overwrite real data.
   const loadNamespace = useCallback(async (code) => {
     const k = nsKeys(code);
-    const [p, m, s, sh, sc, ck] = await Promise.all([
+    const [p, m, s, sh, sc, ck, qa] = await Promise.all([
       loadKey(k.pantry, []),
       loadKey(k.matches, []),
       loadKey(k.staples, STAPLES_LIST),
       loadKey(k.shopping, []),
       loadKey(k.stock, {}),
       loadKey(k.cooked, []),
+      loadKey(k.quick, { add: [], hide: [] }),
     ]);
     // Staples migration. Older builds stored a bare array; current builds
     // store {v, items}. Two cases are handled differently on purpose:
@@ -475,8 +482,14 @@ export default function Simmer() {
     }
     const migrated = sItems;
     if (sVer < 27 || Array.isArray(s)) saveKey(k.staples, { v: 27, items: migrated }).catch(() => {});
-    setPantry(p); setMatches(m); setStaples(migrated); setShopping(sh); setStockCounts(sc || {});
+    // Legacy migration: `out` used to mean "in the pantry but I've run out".
+    // Deselecting now removes an item outright, so that state no longer
+    // exists — anything still carrying it is something the user had already
+    // said they don't have, and it belongs back in quick add, not in the list.
+    const pantryItems = (p || []).filter((x) => !x.out).map(({ out, ...rest }) => rest);
+    setPantry(pantryItems); setMatches(m); setStaples(migrated); setShopping(sh); setStockCounts(sc || {});
     setCooked(Array.isArray(ck) ? ck : []);
+    setQuickEdits({ add: qa?.add || [], hide: qa?.hide || [] });
     // Only now does state genuinely represent this namespace, so only now is
     // it safe to write back to it. On a throw above we never reach this line.
     loadedCodeRef.current = code ?? null;
@@ -574,6 +587,7 @@ export default function Simmer() {
   const persistStaples = useCallback((next) => persistNs("staples", next, setStaples, { v: 27, items: next }), [persistNs]);
   const persistShopping = useCallback((next) => persistNs("shopping", next, setShopping), [persistNs]);
   const persistCooked = useCallback((next) => persistNs("cooked", next, setCooked), [persistNs]);
+  const persistQuickEdits = useCallback((next) => persistNs("quick", next, setQuickEdits), [persistNs]);
 
   const stockRef = useRef(stockCounts); stockRef.current = stockCounts;
   // learn what the household actually stocks: bump on pantry adds and shopping-list buys
@@ -603,7 +617,7 @@ export default function Simmer() {
   // pantry/staples/custom-recipes changed → current deck is stale; reshuffle against fresh data.
   // Signature covers active item names + staples + recipe count; mood (swipes) survives.
   const matchSig = [
-    (pantry || []).filter((p) => !p.out).map((p) => norm(p.name)).sort().join("|"),
+    (pantry || []).map((p) => norm(p.name)).sort().join("|"),
     (staples || []).map(norm).sort().join("|"),
     allRecipes.length,
   ].join("§");
@@ -634,6 +648,7 @@ export default function Simmer() {
         saveKey(k.staples, { v: 27, items: staplesRef.current || STAPLES_LIST }),
         saveKey(k.shopping, shoppingRef.current || []),
         saveKey(k.cooked, cookedRef.current || []),
+        saveKey(k.quick, quickEditsRef.current || { add: [], hide: [] }),
       ]);
       await saveKey(`hh:${code}:meta`, { createdAt: Date.now() });
       // The writes above seeded this household *from* current state, so state
@@ -677,7 +692,7 @@ export default function Simmer() {
 
   const dealCards = useCallback(
     (currentSwipes, currentSeen, append, target = 20) => {
-      const p = (pantryRef.current || []).filter((x) => !x.out), s = staplesRef.current || [];
+      const p = pantryRef.current || [], s = staplesRef.current || [];
       if (p.length === 0) return;
       setExhausted(null);
       const exclude = new Set(currentSeen.map((n) => n.toLowerCase()));
@@ -717,7 +732,7 @@ export default function Simmer() {
   );
 
   useEffect(() => {
-    if (tab === "swipe" && pantry?.some((x) => !x.out) && deck.length === 0 && !exhausted) {
+    if (tab === "swipe" && pantry?.length && deck.length === 0 && !exhausted) {
       dealCards(swipes, seen, false);
     }
   }, [tab, pantry, deck.length, exhausted, mode, cuisines, maxTime, mealType]);
@@ -796,7 +811,7 @@ export default function Simmer() {
     let timer = null;
     const unsubscribe = subscribeKeys(
       `hh:${code}`,
-      [k.pantry, k.matches, k.staples, k.shopping, k.stock, k.cooked],
+      [k.pantry, k.matches, k.staples, k.shopping, k.stock, k.cooked, k.quick],
       () => {
         clearTimeout(timer);
         timer = setTimeout(() => {
@@ -885,10 +900,10 @@ export default function Simmer() {
           }}
         />
       )}
-      {tab === "pantry" && <PantryTab pantry={pantry} persist={persistPantry} staples={staples} persistStaples={persistStaples} shopping={shopping} persistShopping={persistShopping} matches={matches} stockCounts={stockCounts} bumpStock={bumpStock} />}
+      {tab === "pantry" && <PantryTab pantry={pantry} persist={persistPantry} staples={staples} persistStaples={persistStaples} shopping={shopping} persistShopping={persistShopping} matches={matches} stockCounts={stockCounts} bumpStock={bumpStock} quickEdits={quickEdits} persistQuickEdits={persistQuickEdits} />}
       {tab === "swipe" && (
         <SwipeTab
-          pantry={pantry.filter((x) => !x.out)} deck={deck} exhausted={exhausted} onResetSeen={resetSeen}
+          pantry={pantry} deck={deck} exhausted={exhausted} onResetSeen={resetSeen}
           allRecipes={allRecipes} staples={staples} persistPantry={persistPantry}
           mode={mode} swipes={swipes} cuisines={cuisines} maxTime={maxTime} mealType={mealType}
           canUndo={history.length > 0} onUndo={undoSwipe}
@@ -940,8 +955,8 @@ function Shell({ tab, setTab, matchCount, hhCode, onHousehold, onAddRecipe, onFa
           background: hhCode ? C.greenSoft : "#fff", color: hhCode ? C.green : C.faint,
           borderRadius: 99, padding: "5px 11px", fontFamily: "inherit",
           fontWeight: 700, fontSize: 12, cursor: "pointer",
-        }}>
-          👥 {hhCode || "Solo"}
+        }} aria-label={hhCode ? `Household ${hhCode}` : "Solo — tap to share a pantry"}>
+          {hhCode ? "👥" : "👤"}
         </button>
         <button onClick={onAddRecipe} aria-label="Add recipe" style={{
           border: `1.5px solid ${C.line}`, background: "#fff", borderRadius: 99,
@@ -1402,12 +1417,14 @@ function FavSheet({ matches, onClose, onOpen, onClearFavs }) {
   );
 }
 
-function PantryTab({ pantry, persist, staples, persistStaples, shopping, persistShopping, matches, stockCounts, bumpStock }) {
+function PantryTab({ pantry, persist, staples, persistStaples, shopping, persistShopping, matches, stockCounts, bumpStock, quickEdits, persistQuickEdits }) {
   const [subTab, setSubTab] = useState("items");
   const [name, setName] = useState("");
   const [listAdd, setListAdd] = useState("");
   const [search, setSearch] = useState("");
   const [quickOpen, setQuickOpen] = useState(pantry.length === 0);
+  const [quickEditing, setQuickEditing] = useState(false);
+  const [quickNew, setQuickNew] = useState("");
   const { toast, setToast, showToast } = useToast();
   const pantryRef = useRef(pantry);
   pantryRef.current = pantry;
@@ -1421,10 +1438,19 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
     const base = Date.now();
     const newItems = cleaned.map((n, i) => {
       const guess = localGuess(n);
-      return { id: base + i, name: n, cat: guess || "other", useSoon: false, out: false };
+      return { id: base + i, name: n, cat: guess || "other", useSoon: false };
     });
     persist([...newItems, ...pantry]);
     bumpStock(cleaned, Object.fromEntries(newItems.map((it) => [it.name, it.cat])));
+    // "Use soon" used to be offered after selecting an item. Selecting is gone
+    // — tapping removes — so it is offered here, at the only other moment the
+    // user is thinking about a specific item.
+    if (newItems.length === 1) {
+      const only = newItems[0];
+      showToast(`✓ ${only.name} added`, { label: "⏰ use soon", fn: () => toggleSoon(only.id) });
+    } else {
+      showToast(`✓ ${newItems.length} added`);
+    }
   };
 
   const add = () => { addNames(name.split(",")); setName(""); };
@@ -1442,15 +1468,6 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
   const isStaple = (n) => staples.some((s) => norm(s) === norm(n));
   const hidden = (n) => onList(n) || isStaple(n);
 
-  const toggleOut = (id) => {
-    const item = pantry.find((p) => p.id === id);
-    if (!item) return;
-    persist(pantry.map((p) => (p.id === id ? { ...p, out: !p.out } : p)));
-    if (item.out) {
-      showToast(`✓ ${item.name} selected`, { label: "⏰ use soon", fn: () => toggleSoon(id) });
-    }
-  };
-
   const toggleSoon = (id) => persist(pantryRef.current.map((p) => (p.id === id ? { ...p, useSoon: !p.useSoon } : p)));
 
   // Staples are the "assume I always have this" list, so promoting an item
@@ -1465,7 +1482,13 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
     persist(pantryRef.current.filter((x) => x.id !== item.id));
     showToast(`${item.name} → staples 🧂`);
   };
-  const removeItem = (id) => persist(pantryRef.current.filter((p) => p.id !== id));
+  // Deselecting is removal: the pantry lists what you have, nothing more.
+  // Anything in the quick-add catalogue reappears there straight away.
+  const removeItem = (id) => {
+    const item = pantryRef.current.find((p) => p.id === id);
+    persist(pantryRef.current.filter((p) => p.id !== id));
+    if (item) showToast(`${item.name} removed`);
+  };
 
   const inPantry = (n) => pantry.some((p) => p.name.toLowerCase() === n.toLowerCase());
   // Quick add is strictly a shortcut for things you don't have yet. Once an
@@ -1473,7 +1496,26 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
   // can't be in two places showing two different states.
   // NB: `hidden` is also what filters the main list, so this stays separate —
   // folding inPantry into it would empty the pantry list entirely.
-  const inQuickAdd = (n) => !hidden(n) && !inPantry(n);
+  const qAdd = quickEdits?.add || [];
+  const qHide = quickEdits?.hide || [];
+  const isHiddenSuggestion = (n) => qHide.some((x) => norm(x) === norm(n));
+  const inQuickAdd = (n) => !hidden(n) && !inPantry(n) && !isHiddenSuggestion(n);
+
+  const hideSuggestion = (n) => {
+    persistQuickEdits({ add: qAdd.filter((x) => norm(x) !== norm(n)), hide: [...qHide, n] });
+    showToast(`${n} hidden from quick add`);
+  };
+  const addSuggestion = (raw) => {
+    const names = raw.split(",").map((x) => x.trim()).filter(Boolean)
+      .filter((n) => !qAdd.some((x) => norm(x) === norm(n)));
+    if (!names.length) return;
+    persistQuickEdits({ add: [...qAdd, ...names], hide: qHide.filter((h) => !names.some((n) => norm(n) === norm(h))) });
+    showToast(`${names.length === 1 ? names[0] : `${names.length} items`} → quick add`);
+  };
+  const restoreSuggestions = () => {
+    persistQuickEdits({ add: qAdd, hide: [] });
+    showToast("Hidden suggestions restored");
+  };
   const q = search.trim().toLowerCase();
   const grouped = CATEGORIES.map((c) => ({
     ...c, items: pantry.filter((p) =>
@@ -1483,21 +1525,19 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
     ),
   })).filter((g) => g.items.length);
 
-  const stockedNames = pantry.filter((p) => !p.out).map((p) => p.name);
+  const stockedNames = pantry.map((p) => p.name);
 
   const gotIt = (g) => {
-    if (isStaple(g.ing)) {
-      if (g.manual) persistShopping(shopping.filter((s) => norm(s) !== norm(g.ing)));
-      showToast(`✓ ${g.ing} restocked (staple)`);
+    // Clearing the shopping list happens on every path — you bought it, so it
+    // comes off the list whether or not the pantry needed changing.
+    if (g.manual) persistShopping(shopping.filter((s) => norm(s) !== norm(g.ing)));
+    if (isStaple(g.ing)) { showToast(`✓ ${g.ing} restocked (staple)`); return; }
+    if (pantry.some((p) => p.name.toLowerCase() === g.ing.toLowerCase())) {
+      showToast(`${g.ing} is already in your pantry`);
       return;
     }
-    const existing = pantry.find((p) => p.name.toLowerCase() === g.ing.toLowerCase());
-    if (existing) persist(pantry.map((p) => (p.id === existing.id ? { ...p, out: false } : p)));
-    else {
-      const guess = localGuess(g.ing);
-      persist([{ id: Date.now(), name: g.ing, cat: guess || "other", useSoon: false, out: false }, ...pantry]);
-    }
-    if (g.manual) persistShopping(shopping.filter((s) => norm(s) !== norm(g.ing)));
+    const guess = localGuess(g.ing);
+    persist([{ id: Date.now(), name: g.ing, cat: guess || "other", useSoon: false }, ...pantry]);
     bumpStock([g.ing]);
     showToast(`✓ ${g.ing} → pantry`);
   };
@@ -1561,8 +1601,48 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
               background: "#fff", border: `1.5px solid ${C.line}`, borderRadius: 14,
               padding: "10px 12px", marginBottom: 12, animation: "slideDown .15s ease",
             }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                <span style={{ fontSize: 11, color: C.faint, fontWeight: 600, flex: 1 }}>
+                  {quickEditing ? "Tap an item to hide it from quick add" : "Tap to add · swipe right → shopping list"}
+                </span>
+                <button onClick={() => { setQuickEditing((v) => !v); setQuickNew(""); }} style={{
+                  border: `1.5px solid ${quickEditing ? C.green : C.line}`,
+                  background: quickEditing ? C.greenSoft : "#fff",
+                  color: quickEditing ? C.green : C.faint, borderRadius: 99, padding: "4px 11px",
+                  fontFamily: "inherit", fontWeight: 700, fontSize: 11.5, cursor: "pointer",
+                }}>{quickEditing ? "Done" : "Edit"}</button>
+              </div>
+
+              {quickEditing && (
+                <div style={{ marginBottom: 10 }}>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <input
+                      value={quickNew}
+                      onChange={(e) => setQuickNew(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") { addSuggestion(quickNew); setQuickNew(""); } }}
+                      placeholder="Add to quick add, e.g. paneer, curry leaves"
+                      style={{
+                        flex: 1, padding: "8px 12px", borderRadius: 10, border: `1.5px solid ${C.line}`,
+                        fontFamily: "inherit", fontSize: 13, background: "#fff", outline: "none", color: C.ink,
+                      }}
+                    />
+                    <button onClick={() => { addSuggestion(quickNew); setQuickNew(""); }} style={{
+                      padding: "0 14px", borderRadius: 10, border: "none", background: C.green,
+                      color: "#fff", fontFamily: "inherit", fontWeight: 800, fontSize: 13, cursor: "pointer",
+                    }}>Add</button>
+                  </div>
+                  {qHide.length > 0 && (
+                    <button onClick={restoreSuggestions} style={{
+                      marginTop: 6, border: "none", background: "transparent", color: C.faint,
+                      fontFamily: "inherit", fontSize: 11, fontWeight: 600, cursor: "pointer", textDecoration: "underline",
+                    }}>restore {qHide.length} hidden</button>
+                  )}
+                </div>
+              )}
+
               {(() => {
-                // learn from behavior: items stocked 3+ times join their category group
+                // Built-in suggestions, plus anything stocked 3+ times (learned
+                // from behaviour), plus whatever the user added by hand.
                 const staticNorms = new Set(QUICK_ADD.flatMap((g) => g.items.map((n) => norm(n))));
                 const learned = Object.values(stockCounts || {})
                   .filter((e) => e.n >= 3 && !staticNorms.has(norm(e.name)))
@@ -1570,6 +1650,11 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
                   .slice(0, 15);
                 const extras = {};
                 for (const e of learned) (extras[e.cat] = extras[e.cat] || []).push(e.name);
+                for (const n of qAdd) {
+                  if (staticNorms.has(norm(n))) continue;
+                  const cat = localGuess(n) || "other";
+                  (extras[cat] = extras[cat] || []).unshift(n);
+                }
                 return QUICK_ADD.map((g) => ({ ...g, items: [...(extras[g.cat] || []), ...g.items] }));
               })().map((g) => {
                 const meta = CATEGORIES.find((c) => c.id === g.cat);
@@ -1582,13 +1667,14 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
                     <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
                       {g.items.filter(inQuickAdd).map((n) => (
                         // Always "new" here — anything already in the pantry is
-                        // filtered out above, so tapping only ever adds.
+                        // filtered out above, so a normal tap only ever adds.
                         <SmartChip
                           key={n}
-                          p={{ name: n, out: true, useSoon: false }}
+                          p={{ name: n, useSoon: false }}
                           isNew
-                          onTap={() => addNames([n])}
-                          onSwipeRight={() => addToShopping(n)}
+                          prefix={quickEditing ? "− " : "+ "}
+                          onTap={() => (quickEditing ? hideSuggestion(n) : addNames([n]))}
+                          onSwipeRight={quickEditing ? undefined : () => addToShopping(n)}
                         />
                       ))}
                     </div>
@@ -1623,24 +1709,23 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
 
           {pantry.length > 0 && (
             <p style={{ fontSize: 11.5, color: C.faint, margin: "0 0 10px", lineHeight: 1.5 }}>
-              Tap to select or deselect · swipe right → shopping list · long-press → staples
+              Tap to remove · swipe right → shopping list · long-press → staples
             </p>
           )}
 
           {grouped.map((g) => (
             <div key={g.id} style={{ marginBottom: 14 }}>
               <div style={{ fontSize: 11.5, fontWeight: 800, color: C.faint, letterSpacing: "0.07em", textTransform: "uppercase", marginBottom: 6 }}>
-                {g.emoji} {g.label} · {g.items.filter((p) => !p.out).length}/{g.items.length}
+                {g.emoji} {g.label} · {g.items.length}
               </div>
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                 {g.items.map((p) => (
                   <SmartChip
                     key={p.id}
                     p={p}
-                    onTap={() => toggleOut(p.id)}
+                    onTap={() => removeItem(p.id)}
                     onSwipeRight={() => addToShopping(p.name)}
                     onLongPress={() => makeStaple(p)}
-                    onDelete={() => removeItem(p.id)}
                   />
                 ))}
               </div>
@@ -1650,7 +1735,12 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
       )}
 
       {subTab === "staples" && (
-        <StaplesEditor staples={staples} persistStaples={persistStaples} />
+        <StaplesEditor
+          staples={staples}
+          persistStaples={persistStaples}
+          onShop={addToShopping}
+          onRemoved={(s) => showToast(`${s} → quick add`)}
+        />
       )}
 
       {subTab === "list" && (
@@ -1681,25 +1771,25 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
               </p>
             </Center>
           ) : (
+            <>
+            <p style={{ fontSize: 11, color: C.faint, margin: "0 0 8px", lineHeight: 1.5 }}>
+              Tap when you've bought it · long-press to drop it from the list
+            </p>
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
               {shopping.map((item) => (
-                <span key={item} style={{
-                  display: "inline-flex", alignItems: "center", gap: 4,
-                  border: `1.5px solid ${C.pink}`, background: "#FFF0F3",
-                  borderRadius: 99, padding: "5px 6px 5px 12px", fontSize: 13.5, fontWeight: 600, color: C.ink,
-                }}>
-                  <button onClick={() => gotIt({ ing: item, manual: true })} style={{
-                    border: "none", background: "transparent", fontFamily: "inherit", fontWeight: 600,
-                    fontSize: 13.5, color: C.ink, cursor: "pointer", padding: 0,
-                  }}>{item}</button>
-                  <button onClick={() => persistShopping(shopping.filter((s) => norm(s) !== norm(item)))} aria-label={`Remove ${item}`} style={{
-                    border: "none", background: "#F3F1E8", color: C.faint, borderRadius: "50%",
-                    width: 19, height: 19, fontSize: 10, cursor: "pointer", lineHeight: 1,
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                  }}>✕</button>
-                </span>
+                <SmartChip
+                  key={item}
+                  p={{ name: item, useSoon: false }}
+                  prefix=""
+                  onTap={() => gotIt({ ing: item, manual: true })}
+                  onLongPress={() => {
+                    persistShopping(shopping.filter((s) => norm(s) !== norm(item)));
+                    showToast(`${item} removed from list`);
+                  }}
+                />
               ))}
             </div>
+            </>
           )}
         </>
       )}
@@ -1707,7 +1797,7 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
   );
 }
 
-function SmartChip({ p, isNew, onTap, onSwipeRight, onLongPress, onDelete }) {
+function SmartChip({ p, isNew, prefix, onTap, onSwipeRight, onLongPress }) {
   const [dx, setDx] = useState(0);
   const startX = useRef(null);
   const movedRef = useRef(false);
@@ -1726,8 +1816,8 @@ function SmartChip({ p, isNew, onTap, onSwipeRight, onLongPress, onDelete }) {
     handledRef.current = Date.now();
     setDx(0);
     startX.current = null;
-    if (d >= THRESHOLD) onSwipeRight();
-    else if (!movedRef.current) onTap();
+    if (d >= THRESHOLD) onSwipeRight?.();
+    else if (!movedRef.current) onTap?.();
   };
 
   const down = (e) => {
@@ -1750,7 +1840,7 @@ function SmartChip({ p, isNew, onTap, onSwipeRight, onLongPress, onDelete }) {
     if (startX.current === null) return;
     const d = e.clientX - startX.current;
     if (Math.abs(d) > 8) { movedRef.current = true; cancelLongPress(); }
-    if (longFired.current) return;
+    if (longFired.current || !onSwipeRight) return;
     setDx(Math.max(0, Math.min(d, 84)));
   };
   const up = () => {
@@ -1763,16 +1853,15 @@ function SmartChip({ p, isNew, onTap, onSwipeRight, onLongPress, onDelete }) {
     // fallback for webviews that never fire pointerup
     if (longFired.current || Date.now() - handledRef.current < 500) return;
     setDx(0); startX.current = null;
-    onTap();
+    onTap?.();
   };
 
   const armed = dx >= THRESHOLD;
   const pull = Math.min(dx / THRESHOLD, 1);
-  const on = !isNew && !p.out;
 
   return (
     <span style={{ position: "relative", display: "inline-flex", alignItems: "center", gap: 3 }}>
-      {dx > 5 && (
+      {onSwipeRight && dx > 5 && (
         <span style={{
           position: "absolute", left: 3, top: "50%",
           transform: `translateY(-50%) scale(${0.6 + pull * 0.5})`,
@@ -1789,30 +1878,23 @@ function SmartChip({ p, isNew, onTap, onSwipeRight, onLongPress, onDelete }) {
         onContextMenu={(e) => e.preventDefault()}
         style={{
           padding: "6px 12px", borderRadius: 99, fontSize: 13.5, fontFamily: "inherit",
-          fontWeight: on ? 600 : 500, cursor: "pointer", position: "relative", zIndex: 1,
+          fontWeight: isNew ? 500 : 600, cursor: "pointer", position: "relative", zIndex: 1,
           userSelect: "none", WebkitUserSelect: "none", WebkitTouchCallout: "none",
           touchAction: "pan-y",
           transform: `translateX(${dx}px)`,
           transition: startX.current === null ? "transform .18s ease, background .12s ease, border-color .12s ease" : "none",
-          // Being in the pantry is the normal case, so it reads plain — no
-          // tick, no green. Deselected items are the exception and are muted
-          // instead, which keeps the two states apart without colouring in
-          // every chip. "Use soon" keeps its accent; it's a real signal.
-          border: armed ? `1.5px solid ${C.pink}` : on && p.useSoon ? `1.5px solid ${C.gold}` : `1.5px solid ${C.line}`,
-          background: armed ? "#FFF0F3" : on ? (p.useSoon ? C.goldSoft : "#fff") : "#F3F1E8",
-          color: armed ? C.pink : on ? (p.useSoon ? "#9A6700" : C.ink) : C.faint,
-          textDecoration: !isNew && !on ? "line-through" : "none",
+          // Every chip shown is something you actually have (or, in quick add,
+          // something you could add). There is no "deselected but still
+          // listed" state any more — deselecting removes the item — so nothing
+          // is greyed or struck through. "Use soon" keeps its accent; it is a
+          // real signal rather than a restatement of the default.
+          border: armed ? `1.5px solid ${C.pink}` : p.useSoon ? `1.5px solid ${C.gold}` : `1.5px solid ${C.line}`,
+          background: armed ? "#FFF0F3" : p.useSoon ? C.goldSoft : "#fff",
+          color: armed ? C.pink : p.useSoon ? "#9A6700" : C.ink,
         }}>
-        {isNew ? "+ " : on && p.useSoon ? "⏰ " : ""}{p.name}
+        {prefix ?? (isNew ? "+ " : p.useSoon ? "⏰ " : "")}{p.name}
         {p.sorting && <span style={{ fontSize: 10, marginLeft: 4, animation: "pulse 1.2s infinite" }}>…</span>}
       </button>
-      {onDelete && !isNew && p.out && (
-        <button type="button" onClick={onDelete} aria-label={`Delete ${p.name}`} style={{
-          border: "none", background: "#F3F1E8", color: C.faint, borderRadius: "50%",
-          width: 20, height: 20, fontSize: 10, cursor: "pointer", lineHeight: 1,
-          display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
-        }}>✕</button>
-      )}
     </span>
   );
 }
@@ -1822,9 +1904,12 @@ const toolbarBtn = (color) => ({
   fontWeight: 800, fontSize: 13, cursor: "pointer", padding: 0,
 });
 
-function StaplesEditor({ staples, persistStaples }) {
+function StaplesEditor({ staples, persistStaples, onShop, onRemoved }) {
   const [adding, setAdding] = useState("");
-  const removeStaple = (s) => persistStaples(staples.filter((x) => x !== s));
+  // Demoting a staple puts it back in the quick-add catalogue, which happens
+  // for free: `hidden()` filters staples out of quick add, so dropping it here
+  // makes it selectable again.
+  const removeStaple = (s) => { persistStaples(staples.filter((x) => x !== s)); onRemoved?.(s); };
   const addStaple = () => {
     const items = adding.split(",").map((x) => x.trim().toLowerCase()).filter(Boolean)
       .filter((x) => !staples.includes(x));
@@ -1842,6 +1927,9 @@ function StaplesEditor({ staples, persistStaples }) {
       background: C.goldSoft, border: `1.5px dashed ${C.gold}88`,
       borderRadius: 14, padding: "12px 14px",
     }}>
+      <p style={{ fontSize: 11, color: "#9A6700", margin: "0 0 8px", lineHeight: 1.5 }}>
+        Assumed always in stock. Swipe right → shopping list · long-press → back to quick add
+      </p>
       <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 6 }}>
         <button onClick={() => persistStaples(STAPLES_LIST)} style={{
           border: "none", background: "transparent", color: C.faint,
@@ -1855,18 +1943,13 @@ function StaplesEditor({ staples, persistStaples }) {
           </div>
           <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
             {g.items.map((s) => (
-              <span key={s} style={{
-                background: "#fff", border: `1px solid ${C.line}`, borderRadius: 99,
-                padding: "3px 6px 3px 8px", fontSize: 12.5, fontWeight: 500, color: C.ink,
-                display: "inline-flex", alignItems: "center", gap: 4,
-              }}>
-                {s}
-                <button onClick={() => removeStaple(s)} aria-label={`Remove ${s}`} style={{
-                  border: "none", background: "#F3F1E8", color: C.faint, borderRadius: "50%",
-                  width: 16, height: 16, fontSize: 10, cursor: "pointer", lineHeight: 1,
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                }}>✕</button>
-              </span>
+              <SmartChip
+                key={s}
+                p={{ name: s, useSoon: false }}
+                prefix=""
+                onSwipeRight={() => onShop?.(s)}
+                onLongPress={() => removeStaple(s)}
+              />
             ))}
           </div>
         </div>
@@ -1900,7 +1983,7 @@ function SwipeTab({ pantry, deck, exhausted, onResetSeen, allRecipes, staples, p
   const addToPantry = (name) => {
     const existing = pantry.find((p) => p.name.toLowerCase() === name.toLowerCase());
     if (existing) return; // already have it
-    persistPantry([{ id: Date.now(), name, cat: localGuess(name) || "other", useSoon: false, out: false }, ...pantry]);
+    persistPantry([{ id: Date.now(), name, cat: localGuess(name) || "other", useSoon: false }, ...pantry]);
   };
   const [openFilter, setOpenFilter] = useState(null);
   const toggleCuisine = (c) =>
@@ -2433,8 +2516,10 @@ function MatchesTab({ matches, persist, pantry, persistPantry, staples, shopping
   // so a cooked recipe is still viewable after matches are cleared.
   const markUsed = (m) => {
     const used = m.uses || [];
-    const n = pantry.filter((p) => !p.out && used.some((u) => ingMatch(p.name, u))).length;
-    persistPantry(pantry.map((p) => (used.some((u) => ingMatch(p.name, u)) ? { ...p, out: true } : p)));
+    const n = pantry.filter((p) => used.some((u) => ingMatch(p.name, u))).length;
+    // Used up means gone from the pantry, not greyed out inside it — they go
+    // back to quick add, one tap from being restocked.
+    persistPantry(pantry.filter((p) => !used.some((u) => ingMatch(p.name, u))));
 
     const id = m.repoId || m.name;
     const prev = (cooked || []).find((c) => (c.repoId || c.name) === id);
@@ -2483,21 +2568,15 @@ function MatchesTab({ matches, persist, pantry, persistPantry, staples, shopping
   // out of the list until reopened from the ♥ sheet, which un-hides them.
   const visible = matches.filter((m) => !m.listHidden);
 
-  const stockedNames = pantry.filter((p) => !p.out).map((p) => p.name);
+  const stockedNames = pantry.map((p) => p.name);
 
   const gotIt = (g) => {
-    if (isStaple(g.ing)) {
-      if (g.manual) persistShopping(shopping.filter((s) => norm(s) !== norm(g.ing)));
-      showToast(`✓ ${g.ing} restocked (staple)`);
-      return;
-    }
-    const existing = pantry.find((p) => p.name.toLowerCase() === g.ing.toLowerCase());
-    if (existing) persistPantry(pantry.map((p) => (p.id === existing.id ? { ...p, out: false } : p)));
-    else {
-      const guess = localGuess(g.ing);
-      persistPantry([{ id: Date.now(), name: g.ing, cat: guess || "other", useSoon: false, out: false }, ...pantry]);
-    }
+    // As in PantryTab: the list entry clears on every path.
     if (g.manual) persistShopping(shopping.filter((s) => norm(s) !== norm(g.ing)));
+    if (isStaple(g.ing)) { showToast(`✓ ${g.ing} restocked (staple)`); return; }
+    if (pantry.some((p) => p.name.toLowerCase() === g.ing.toLowerCase())) return;
+    const guess = localGuess(g.ing);
+    persistPantry([{ id: Date.now(), name: g.ing, cat: guess || "other", useSoon: false }, ...pantry]);
     bumpStock([g.ing]);
   };
 
@@ -2542,7 +2621,7 @@ function MatchesTab({ matches, persist, pantry, persistPantry, staples, shopping
       {visible.map((m) => {
         const open = openId === m.savedAt;
         const usedInPantry = (m.uses || []).filter((u) =>
-          pantry.some((p) => !p.out && ingMatch(p.name, u))
+          pantry.some((p) => ingMatch(p.name, u))
         );
         return (
           <div key={m.savedAt} style={{
@@ -2628,7 +2707,7 @@ function MatchesTab({ matches, persist, pantry, persistPantry, staples, shopping
                     background: m.fav ? "#FFF0F3" : "#fff", color: m.fav ? "#FF4466" : C.faint,
                     fontFamily: "inherit", fontWeight: 800, fontSize: 13, cursor: "pointer",
                   }}>{m.fav ? "♥ Favorited" : "♡ Favorite"}</button>
-                  {(m.uses || []).some((u) => pantry.some((p) => !p.out && ingMatch(p.name, u))) && (
+                  {(m.uses || []).some((u) => pantry.some((p) => ingMatch(p.name, u))) && (
                     <button onClick={() => markUsed(m)} style={{
                       padding: "9px 14px", borderRadius: 14, border: `1.5px solid ${C.green}`,
                       background: C.greenSoft, color: C.green, fontFamily: "inherit",
