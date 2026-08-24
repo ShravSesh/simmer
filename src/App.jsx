@@ -1773,33 +1773,42 @@ function SwipeCard({ card, index, onSwipe, topId, isLast, unlock }) {
   const [drag, setDrag] = useState({ x: 0, y: 0, active: false });
   const [leaving, setLeaving] = useState(null);
   const start = useRef(null);
+  const dirLock = useRef(null);
   const isTop = card.id === topId;
 
   const onDown = (e) => {
     if (!isTop) return;
-    e.preventDefault();
     start.current = { x: e.clientX, y: e.clientY, t: Date.now() };
-    try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
-    setDrag((d) => ({ ...d, active: true }));
+    dirLock.current = null;
   };
   const onMove = (e) => {
     if (!start.current) return;
-    e.preventDefault();
-    setDrag({ x: e.clientX - start.current.x, y: e.clientY - start.current.y, active: true });
+    const dx = e.clientX - start.current.x;
+    const dy = e.clientY - start.current.y;
+    if (!dirLock.current && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
+      dirLock.current = Math.abs(dx) > Math.abs(dy) ? "h" : "v";
+      if (dirLock.current === "h") {
+        try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+      }
+    }
+    if (dirLock.current === "h") {
+      e.preventDefault();
+      setDrag({ x: dx, y: dy, active: true });
+    }
   };
-  const onUp = () => {
+  const onUp = (e) => {
     if (!start.current) return;
-    const x = drag.x, y = drag.y;
-    const dt = Date.now() - start.current.t;
+    const x = drag.x;
     start.current = null;
-    if (Math.abs(x) > 90) {
+    if (dirLock.current === "h" && Math.abs(x) > 90) {
       const dir = x > 0 ? "right" : "left";
       setLeaving(dir);
       setTimeout(() => onSwipe(card, dir), 180);
     } else {
-      // tap does nothing — card is scrollable
       setDrag({ x: 0, y: 0, active: false });
     }
+    dirLock.current = null;
+    try { e.currentTarget.releasePointerCapture(e.pointerId); } catch {}
   };
 
   const x = leaving ? (leaving === "right" ? 500 : -500) : drag.x;
