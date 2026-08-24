@@ -842,6 +842,15 @@ export default function Simmer() {
         <FavSheet
           matches={matches || []}
           onClose={() => setFavSheet(false)}
+          onClearFavs={() => {
+            // Un-hearting a normal match just drops the heart; it is still in
+            // Matches. But a favourite that "clear matches" hid lives ONLY
+            // here — un-hearting it would strand it with no way back, so it
+            // is removed outright instead.
+            persistMatches((matches || [])
+              .filter((m) => !(m.fav && m.listHidden))
+              .map((m) => (m.fav ? { ...m, fav: false } : m)));
+          }}
           onOpen={(savedAt) => {
             // Opening a favourite that "clear" hid returns it to the list —
             // that is what "hidden until I view faves" resolves to.
@@ -944,7 +953,7 @@ function Shell({ tab, setTab, matchCount, hhCode, onHousehold, onAddRecipe, onFa
           background: favCount ? "#FFF0F3" : "#fff", borderRadius: 99,
           padding: "6px 11px", fontFamily: "inherit", fontWeight: 800, fontSize: 13,
           cursor: "pointer", color: favCount ? "#FF4466" : C.faint,
-        }}>♥{favCount ? ` ${favCount}` : ""}</button>
+        }}>♥</button>
         <button onClick={onCooked} aria-label="Cooked" style={{
           border: `1.5px solid ${cookedCount ? C.gold : C.line}`,
           background: cookedCount ? C.goldSoft : "#fff", borderRadius: 99,
@@ -1338,8 +1347,15 @@ function CookedSheet({ cooked, onClose, onCookAgain }) {
   );
 }
 
-function FavSheet({ matches, onClose, onOpen }) {
+function FavSheet({ matches, onClose, onOpen, onClearFavs }) {
   const favs = matches.filter((m) => m.fav);
+  const clear = () => {
+    if (!window.confirm(
+      `Remove all ${favs.length} favourite${favs.length === 1 ? "" : "s"}? The recipes stay in Matches unless they were already cleared from there.`,
+    )) return;
+    onClearFavs();
+    onClose();
+  };
   return (
     <div style={{ position: "absolute", inset: 0, background: "rgba(30,43,32,.35)", zIndex: 80, display: "flex", alignItems: "flex-end" }} onClick={onClose}>
       <div onClick={(e) => e.stopPropagation()} style={{
@@ -1347,7 +1363,18 @@ function FavSheet({ matches, onClose, onOpen }) {
         overflowY: "auto", padding: "18px 20px 26px",
       }}>
         <div style={{ display: "flex", alignItems: "center", marginBottom: 14 }}>
-          <span style={{ fontFamily: "'Fraunces', serif", fontWeight: 800, fontSize: 20, flex: 1, color: "#FF4466" }}>♥ Favorites</span>
+          <span style={{ fontFamily: "'Fraunces', serif", fontWeight: 800, fontSize: 20, color: "#FF4466" }}>♥ Favorites</span>
+          {favs.length > 0 && (
+            <span style={{ marginLeft: 8, fontSize: 13, fontWeight: 700, color: C.faint }}>{favs.length}</span>
+          )}
+          <span style={{ flex: 1 }} />
+          {favs.length > 0 && (
+            <button onClick={clear} style={{
+              border: `1.5px solid ${C.line}`, background: "#fff", color: C.faint,
+              borderRadius: 99, padding: "5px 12px", marginRight: 8,
+              fontFamily: "inherit", fontWeight: 700, fontSize: 12, cursor: "pointer",
+            }}>Clear</button>
+          )}
           <button onClick={onClose} style={{ border: "none", background: "#F3F1E8", borderRadius: "50%", width: 30, height: 30, cursor: "pointer", color: C.faint }}>✕</button>
         </div>
         {favs.length === 0 ? (
