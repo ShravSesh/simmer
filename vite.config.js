@@ -2,7 +2,14 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 
+// Stamped into the bundle so a running client can report which build it is.
+// Vercel exposes the commit sha; fall back to the build time locally.
+const BUILD_ID =
+  (process.env.VERCEL_GIT_COMMIT_SHA || "").slice(0, 7) ||
+  new Date().toISOString().slice(0, 16).replace("T", " ");
+
 export default defineConfig({
+  define: { __BUILD_ID__: JSON.stringify(BUILD_ID) },
   plugins: [
     react(),
     VitePWA({
