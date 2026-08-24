@@ -161,6 +161,17 @@ const AMBIGUOUS_HEADS = new Set(["pepper", "milk", "butter", "clove"]);
 const TRAILING_FORMS = new Set(["cheese", "leaf", "leave", "clove", "stalk", "sprig", "head", "bulb", "seed"]);
 const stripForm = (t) => (t.length >= 2 && TRAILING_FORMS.has(t[t.length - 1]) ? t.slice(0, -1) : t);
 
+// Words where the raw form and the prepared product are different ingredients.
+// "mustard seeds" is a whole spice you temper in oil; "mustard" is the
+// condiment. Stripping the form noun would otherwise reduce the first to the
+// second and treat having either as covering both.
+//
+// This is deliberately narrow. It is NOT the same rule as AMBIGUOUS_HEADS —
+// that stops a bare head absorbing a compound with the same head ("butter" vs
+// "peanut butter"); this stops form-stripping equating two different products.
+// Most seeds don't belong here: "cumin seeds" really is "cumin".
+const FORM_CHANGES_IDENTITY = new Set(["mustard"]);
+
 // True when two token lists name the same ingredient.
 //
 // The rule is subset-on-a-shared-head: the last token is the noun being
@@ -188,8 +199,13 @@ function ingMatch(a, b) {
   const ta = tokenize(a), tb = tokenize(b);
   if (tokensMatch(ta, tb)) return true;
   const sa = stripForm(ta), sb = stripForm(tb);
-  if (sa !== ta || sb !== tb) return tokensMatch(sa, sb);
-  return false;
+  if (sa === ta && sb === tb) return false; // nothing to strip; already decided
+  // Refuse when stripping would collapse a compound onto a bare word that
+  // names a different product — "mustard seeds" must not become "mustard".
+  const collapsed = (orig, stripped) =>
+    stripped.length === 1 && orig.length > 1 && FORM_CHANGES_IDENTITY.has(stripped[0]);
+  if (collapsed(ta, sa) || collapsed(tb, sb)) return false;
+  return tokensMatch(sa, sb);
 }
 
 function ingInList(ing, list) {
@@ -326,6 +342,41 @@ function pickFromRepo(recipes, { pantry, staples, mode, exclude, swipes, cuisine
     ...c.r, ...c.fit, id: uid(),
     wildcard: !wanted.size && liked.size ? !liked.has((c.r.cuisine || "").toLowerCase()) && i === picks.length - 1 : false,
   }));
+}
+
+// Transient confirmation banner. Lives here rather than inside one tab
+// because MatchesTab called showToast without having one — a ReferenceError
+// the moment you tapped "got it" on a staple.
+function useToast() {
+  const [toast, setToast] = useState(null);
+  const timer = useRef(null);
+  const showToast = useCallback((msg, action = null) => {
+    setToast({ msg, action });
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => setToast(null), action ? 3000 : 1500);
+  }, []);
+  useEffect(() => () => clearTimeout(timer.current), []); // don't fire after unmount
+  return { toast, setToast, showToast };
+}
+
+function Toast({ toast, setToast }) {
+  if (!toast) return null;
+  return (
+    <div style={{
+      position: "absolute", top: 8, left: "50%", transform: "translateX(-50%)", zIndex: 40,
+      background: C.ink, color: "#fff", borderRadius: 99, padding: "8px 10px 8px 16px",
+      fontSize: 13, fontWeight: 700, whiteSpace: "nowrap", animation: "slideDown .15s ease",
+      boxShadow: "0 8px 24px rgba(30,43,32,.35)", display: "flex", alignItems: "center", gap: 8,
+    }}>
+      {toast.msg}
+      {toast.action && (
+        <button onClick={() => { toast.action.fn(); setToast(null); }} style={{
+          border: "none", background: C.pink, color: "#fff", borderRadius: 99,
+          padding: "5px 12px", fontFamily: "inherit", fontWeight: 800, fontSize: 12, cursor: "pointer",
+        }}>{toast.action.label}</button>
+      )}
+    </div>
+  );
 }
 
 /* ==================================================================
@@ -1246,18 +1297,11 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
   const [listAdd, setListAdd] = useState("");
   const [search, setSearch] = useState("");
   const [quickOpen, setQuickOpen] = useState(pantry.length === 0);
-  const [toast, setToast] = useState(null);
+  const { toast, setToast, showToast } = useToast();
   const pantryRef = useRef(pantry);
   pantryRef.current = pantry;
   const shoppingRef = useRef(shopping);
   shoppingRef.current = shopping;
-  const toastTimer = useRef(null);
-
-  const showToast = (msg, action = null) => {
-    setToast({ msg, action });
-    clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToast(null), action ? 3000 : 1500);
-  };
 
   const addNames = (names) => {
     const cleaned = names.map((s) => s.trim()).filter(Boolean)
@@ -1342,22 +1386,7 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
 
   return (
     <div style={{ flex: 1, overflowY: "auto", padding: "6px 20px 24px" }}>
-      {toast && (
-        <div style={{
-          position: "absolute", top: 8, left: "50%", transform: "translateX(-50%)", zIndex: 40,
-          background: C.ink, color: "#fff", borderRadius: 99, padding: "8px 10px 8px 16px",
-          fontSize: 13, fontWeight: 700, whiteSpace: "nowrap", animation: "slideDown .15s ease",
-          boxShadow: "0 8px 24px rgba(30,43,32,.35)", display: "flex", alignItems: "center", gap: 8,
-        }}>
-          {toast.msg}
-          {toast.action && (
-            <button onClick={() => { toast.action.fn(); setToast(null); }} style={{
-              border: "none", background: C.pink, color: "#fff", borderRadius: 99,
-              padding: "5px 12px", fontFamily: "inherit", fontWeight: 800, fontSize: 12, cursor: "pointer",
-            }}>{toast.action.label}</button>
-          )}
-        </div>
-      )}
+      <Toast toast={toast} setToast={setToast} />
 
       <div style={{ display: "flex", background: "#F0EDE2", borderRadius: 12, padding: 3, marginBottom: 12 }}>
         {subTabs.map((t) => (
@@ -1428,7 +1457,20 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
                             key={n}
                             p={existing || { name: n, out: true, useSoon: false }}
                             isNew={!existing}
-                            onTap={() => (existing ? toggleOut(existing.id) : addNames([n]))}
+                            onTap={() => {
+                              if (!existing) return addNames([n]);
+                              // Deselecting here removes the item rather than
+                              // leaving an out-of-stock entry behind in the
+                              // pantry list. The pantry list's own chips still
+                              // toggle in/out — that's where "I'm out of this,
+                              // keep it on the list" belongs.
+                              if (!existing.out) {
+                                removeItem(existing.id);
+                                showToast(`${existing.name} removed`);
+                                return;
+                              }
+                              return toggleOut(existing.id); // was out → restock
+                            }}
                             onSwipeRight={() => addToShopping(n)}
                           />
                         );
@@ -2210,6 +2252,7 @@ function scaledIng(m, serves) {
 }
 
 function MatchesTab({ matches, persist, pantry, persistPantry, staples, shopping, persistShopping, openTarget, clearOpenTarget, bumpStock }) {
+  const { toast, setToast, showToast } = useToast();
   const [openId, setOpenId] = useState(null);
   const [spinning, setSpinning] = useState(false);
   const [highlightId, setHighlightId] = useState(null);
@@ -2231,9 +2274,14 @@ function MatchesTab({ matches, persist, pantry, persistPantry, staples, shopping
     if (openId === m.savedAt) setOpenId(null);
   };
 
+  // "Cooked it": the recipe's pantry ingredients are now used up, so mark them
+  // out of stock. They stay in the pantry list (greyed out) so they're one tap
+  // to restock, and matching skips them until then.
   const markUsed = (m) => {
     const used = m.uses || [];
     persistPantry(pantry.map((p) => (used.some((u) => ingMatch(p.name, u)) ? { ...p, out: true } : p)));
+    const n = pantry.filter((p) => !p.out && used.some((u) => ingMatch(p.name, u))).length;
+    if (n) showToast(`${n} ingredient${n > 1 ? "s" : ""} marked used up`);
   };
 
   const pickDinner = () => {
@@ -2286,6 +2334,7 @@ function MatchesTab({ matches, persist, pantry, persistPantry, staples, shopping
 
   return (
     <div style={{ flex: 1, overflowY: "auto", padding: "8px 20px 24px", position: "relative" }}>
+      <Toast toast={toast} setToast={setToast} />
 
       {matches.length >= 2 && (
         <button onClick={pickDinner} disabled={spinning} style={{
@@ -2391,7 +2440,7 @@ function MatchesTab({ matches, persist, pantry, persistPantry, staples, shopping
                       padding: "9px 14px", borderRadius: 14, border: `1.5px solid ${C.green}`,
                       background: C.greenSoft, color: C.green, fontFamily: "inherit",
                       fontWeight: 700, fontSize: 13, cursor: "pointer",
-                    }}>✓ Used</button>
+                    }}>✓ Cooked it</button>
                   )}
                   {m.missing?.length > 0 && (
                     <button onClick={() => {
