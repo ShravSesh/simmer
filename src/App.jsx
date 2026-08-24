@@ -149,6 +149,13 @@ const nsKeys = (code) => ({
 // Cheap key for dedupe/lookup. Not used for matching — tokenize is.
 const norm = (s) => s.toLowerCase().trim().replace(/s$/, "");
 
+// A shopping entry is {n, from} — `from` records which list it was swiped out
+// of, so buying it puts it back there. Older entries are plain strings with no
+// origin; they read as "no origin recorded" and default to the pantry, so no
+// migration is needed and nothing has to be rewritten on load.
+const shopName = (e) => (typeof e === "string" ? e : e?.n ?? "");
+const shopFrom = (e) => (typeof e === "string" ? null : e?.from ?? null);
+
 // Split into comparable word tokens: drop parentheticals ("(optional)") and
 // punctuation, then singularise so "tomatoes"/"tomato" and "berries"/"berry"
 // land on the same token.
@@ -1455,16 +1462,16 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
 
   const add = () => { addNames(name.split(",")); setName(""); };
 
-  const addToShopping = (itemName) => {
+  const addToShopping = (itemName, from = null) => {
     const cur = shoppingRef.current;
-    if (cur.some((s) => norm(s) === norm(itemName))) {
+    if (cur.some((s) => norm(shopName(s)) === norm(itemName))) {
       showToast(`${itemName} already on the list 🛒`);
       return;
     }
-    persistShopping([...cur, itemName]);
+    persistShopping([...cur, { n: itemName, from }]);
     showToast(`${itemName} → shopping list 🛒`);
   };
-  const onList = (n) => shopping.some((s) => norm(s) === norm(n));
+  const onList = (n) => shopping.some((s) => norm(shopName(s)) === norm(n));
   const isStaple = (n) => staples.some((s) => norm(s) === norm(n));
   const hidden = (n) => onList(n) || isStaple(n);
 
@@ -1529,8 +1536,16 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
 
   const gotIt = (g) => {
     // Clearing the shopping list happens on every path — you bought it, so it
-    // comes off the list whether or not the pantry needed changing.
-    if (g.manual) persistShopping(shopping.filter((s) => norm(s) !== norm(g.ing)));
+    // comes off the list whether or not anything else needed changing.
+    if (g.manual) persistShopping(shopping.filter((s) => norm(shopName(s)) !== norm(g.ing)));
+
+    // Back to where it was swiped from. Anything added by hand has no origin
+    // and defaults to the pantry.
+    if (g.from === "staples") {
+      if (!isStaple(g.ing)) persistStaples([...staples, g.ing]);
+      showToast(`✓ ${g.ing} → staples 🧂`);
+      return;
+    }
     if (isStaple(g.ing)) { showToast(`✓ ${g.ing} restocked (staple)`); return; }
     if (pantry.some((p) => p.name.toLowerCase() === g.ing.toLowerCase())) {
       showToast(`${g.ing} is already in your pantry`);
@@ -1543,8 +1558,8 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
   };
   const addListItems = () => {
     const items = listAdd.split(",").map((s) => s.trim()).filter(Boolean)
-      .filter((n) => !shopping.some((s) => norm(s) === norm(n)));
-    if (items.length) persistShopping([...shopping, ...items]);
+      .filter((n) => !shopping.some((s) => norm(shopName(s)) === norm(n)));
+    if (items.length) persistShopping([...shopping, ...items.map((n) => ({ n, from: null }))]);
     setListAdd("");
   };
 
@@ -1724,7 +1739,7 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
                     key={p.id}
                     p={p}
                     onTap={() => removeItem(p.id)}
-                    onSwipeRight={() => addToShopping(p.name)}
+                    onSwipeRight={() => addToShopping(p.name, "pantry")}
                     onLongPress={() => makeStaple(p)}
                   />
                 ))}
@@ -1738,7 +1753,7 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
         <StaplesEditor
           staples={staples}
           persistStaples={persistStaples}
-          onShop={addToShopping}
+          onShop={(name) => addToShopping(name, "staples")}
           onRemoved={(s) => showToast(`${s} → quick add`)}
         />
       )}
@@ -1776,18 +1791,22 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
               Tap when you've bought it · long-press to drop it from the list
             </p>
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-              {shopping.map((item) => (
-                <SmartChip
-                  key={item}
-                  p={{ name: item, useSoon: false }}
-                  prefix=""
-                  onTap={() => gotIt({ ing: item, manual: true })}
-                  onLongPress={() => {
-                    persistShopping(shopping.filter((s) => norm(s) !== norm(item)));
-                    showToast(`${item} removed from list`);
-                  }}
-                />
-              ))}
+              {shopping.map((entry) => {
+                const item = shopName(entry);
+                const from = shopFrom(entry);
+                return (
+                  <SmartChip
+                    key={item}
+                    p={{ name: item, useSoon: false }}
+                    prefix={from === "staples" ? "🧂 " : ""}
+                    onTap={() => gotIt({ ing: item, from, manual: true })}
+                    onLongPress={() => {
+                      persistShopping(shopping.filter((s) => norm(shopName(s)) !== norm(item)));
+                      showToast(`${item} removed from list`);
+                    }}
+                  />
+                );
+              })}
             </div>
             </>
           )}
@@ -2572,7 +2591,7 @@ function MatchesTab({ matches, persist, pantry, persistPantry, staples, shopping
 
   const gotIt = (g) => {
     // As in PantryTab: the list entry clears on every path.
-    if (g.manual) persistShopping(shopping.filter((s) => norm(s) !== norm(g.ing)));
+    if (g.manual) persistShopping(shopping.filter((s) => norm(shopName(s)) !== norm(g.ing)));
     if (isStaple(g.ing)) { showToast(`✓ ${g.ing} restocked (staple)`); return; }
     if (pantry.some((p) => p.name.toLowerCase() === g.ing.toLowerCase())) return;
     const guess = localGuess(g.ing);
@@ -2717,10 +2736,10 @@ function MatchesTab({ matches, persist, pantry, persistPantry, staples, shopping
                   {m.missing?.length > 0 && (
                     <button onClick={() => {
                       const newItems = (m.missing || []).filter((ing) =>
-                        !shopping.some((s) => norm(s) === norm(ing))
+                        !shopping.some((s) => norm(shopName(s)) === norm(ing))
                       );
                       if (newItems.length) {
-                        persistShopping([...shopping, ...newItems]);
+                        persistShopping([...shopping, ...newItems.map((n) => ({ n, from: null }))]);
                       }
                     }} style={{
                       padding: "9px 14px", borderRadius: 14, border: `1.5px solid ${C.pink}`,
