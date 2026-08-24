@@ -1,3 +1,4 @@
+// v2
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { loadKey, saveKey, keyExists } from "./storage.js";
 import { RECIPES as REPO_RAW } from "./data/index.js";
