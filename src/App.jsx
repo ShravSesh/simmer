@@ -1951,14 +1951,18 @@ function SwipeTab({ pantry, deck, exhausted, onResetSeen, allRecipes, staples, p
         </>
       )}
 
+      {/* What this session is leaning toward, read off the right-swipes.
+          Shows from the first one and lists up to four cuisines, most-swiped
+          first. Hidden when a manual cuisine filter is on — the deck is then
+          following that, not a mood. */}
       {(() => {
         if (cuisines.length || deck.length === 0) return null;
         const counts = {};
         for (const s of swipes) if (s.dir === "right" && s.cuisine) counts[s.cuisine.toLowerCase()] = (counts[s.cuisine.toLowerCase()] || 0) + 1;
-        const top = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 2).map(([c]) => c);
-        if (Object.values(counts).reduce((a, b) => a + b, 0) < 2) return null;
+        const top = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([c]) => c);
+        if (!top.length) return null;
         return (
-          <div style={{ textAlign: "center", fontSize: 12, color: C.faint, fontWeight: 700, padding: "0 20px 4px", flexShrink: 0 }}>
+          <div style={{ textAlign: "center", fontSize: 12, color: C.faint, fontWeight: 700, padding: "0 20px 4px", flexShrink: 0, lineHeight: 1.4 }}>
             🔥 Vibing <span style={{ color: C.ink, textTransform: "capitalize" }}>{top.join(" · ")}</span>
           </div>
         );
