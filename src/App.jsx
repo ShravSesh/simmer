@@ -1007,6 +1007,12 @@ function HouseholdPanel({ code, poolCount, syncError, onCreate, onJoin, onLeave,
             📚 {poolCount} recipes in the community pool
           </p>
         )}
+        {/* Which build this device is actually running. A device serving a
+            stale service-worker cache shows an old id here, which is the
+            fastest way to tell "bug" from "hasn't updated yet". */}
+        <p style={{ fontSize: 11, color: C.line, margin: "10px 0 0", textAlign: "center" }}>
+          build {__BUILD_ID__}
+        </p>
       </div>
     </div>
   );
