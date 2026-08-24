@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { loadKey, saveKey, keyExists } from "./storage.js";
+import { loadKey, saveKey, keyExists, syncConfigured, configError, SyncError } from "./storage.js";
 import { RECIPES as REPO_RAW } from "./data/index.js";
 
 const COMMUNITY_KEY = "simmer-community-recipes";
@@ -109,6 +109,10 @@ function localGuess(name) {
   }
   return null;
 }
+
+// Human-readable text for a failed sync. SyncError already carries a
+// user-facing message; anything else is unexpected.
+const msg = (e) => (e instanceof SyncError ? e.message : `Something went wrong: ${e?.message || e}`);
 
 const nsKeys = (code) => ({
   pantry: code ? `hh:${code}:pantry` : "simmer-pantry",
@@ -288,6 +292,8 @@ export default function Simmer() {
   const [hhOpen, setHhOpen] = useState(false);
   const [matchFlash, setMatchFlash] = useState(null);
   const [openTarget, setOpenTarget] = useState(null);
+  // last household-sync failure, surfaced in the household panel
+  const [syncError, setSyncError] = useState(null);
 
   // session-only
   const [deck, setDeck] = useState([]);
@@ -312,11 +318,11 @@ export default function Simmer() {
   const loadNamespace = useCallback(async (code) => {
     const k = nsKeys(code);
     const [p, m, s, sh, sc] = await Promise.all([
-      loadKey(k.pantry, [], k.shared),
-      loadKey(k.matches, [], k.shared),
-      loadKey(k.staples, STAPLES_LIST, k.shared),
-      loadKey(k.shopping, [], k.shared),
-      loadKey(k.stock, {}, k.shared),
+      loadKey(k.pantry, []),
+      loadKey(k.matches, []),
+      loadKey(k.staples, STAPLES_LIST),
+      loadKey(k.shopping, []),
+      loadKey(k.stock, {}),
     ]);
     // staples stored either as legacy array or versioned {v, items}
     let sItems = Array.isArray(s) ? s : (s?.items || STAPLES_LIST);
@@ -329,7 +335,7 @@ export default function Simmer() {
       sItems = [...sItems, ...SPICE_BOX.filter((x) => !have.has(norm(x))), ...INDIAN_PANTRY.filter((x) => !have.has(norm(x)))];
     }
     const migrated = sItems;
-    if (sVer < 27 || Array.isArray(s)) saveKey(k.staples, { v: 27, items: migrated }, k.shared);
+    if (sVer < 27 || Array.isArray(s)) saveKey(k.staples, { v: 27, items: migrated }).catch(() => {});
     setPantry(p); setMatches(m); setStaples(migrated); setShopping(sh); setStockCounts(sc || {});
   }, []);
 
@@ -337,36 +343,46 @@ export default function Simmer() {
     (async () => {
       const prof = await loadKey("simmer-profile", { code: null });
       setProfile(prof);
-      await loadNamespace(prof.code);
+      try {
+        await loadNamespace(prof.code);
+      } catch (e) {
+        // Household unreachable at boot. Fall back to solo data so the app is
+        // usable, but keep the code so the user can retry, and say why.
+        setSyncError(msg(e));
+        await loadNamespace(null).catch(() => {});
+      }
     })();
   }, [loadNamespace]);
 
   // community recipes: global, all households; skip any id already baked into the repo
   const repoIds = React.useMemo(() => new Set(REPO.map((r) => r.repoId)), []);
   const loadCommunity = useCallback(async () => {
-    const raw = await loadKey(COMMUNITY_KEY, [], true);
+    const raw = await loadKey(COMMUNITY_KEY, []);
     setCommunity((Array.isArray(raw) ? raw : []).filter((r) => !repoIds.has(r.repoId)));
   }, [repoIds]);
   const saveCommunity = useCallback(async (nextList) => {
     // read-merge-write to shrink the lost-update window
-    const latest = await loadKey(COMMUNITY_KEY, [], true);
+    const latest = await loadKey(COMMUNITY_KEY, []);
     const byId = new Map((Array.isArray(latest) ? latest : []).map((r) => [r.repoId, r]));
     for (const r of nextList) byId.set(r.repoId, r);
     for (const id of [...byId.keys()]) if (!nextList.some((r) => r.repoId === id) && nextList.__deleted?.includes(id)) byId.delete(id);
     const merged = [...byId.values()];
-    await saveKey(COMMUNITY_KEY, merged, true);
+    await saveKey(COMMUNITY_KEY, merged);
     setCommunity(merged.filter((r) => !repoIds.has(r.repoId)));
   }, [repoIds]);
   const deleteCommunity = useCallback(async (repoId) => {
-    const latest = await loadKey(COMMUNITY_KEY, [], true);
+    const latest = await loadKey(COMMUNITY_KEY, []);
     const merged = (Array.isArray(latest) ? latest : []).filter((r) => r.repoId !== repoId);
-    await saveKey(COMMUNITY_KEY, merged, true);
+    await saveKey(COMMUNITY_KEY, merged);
     setCommunity(merged.filter((r) => !repoIds.has(r.repoId)));
   }, [repoIds]);
   useEffect(() => {
-    loadCommunity();
-    const iv = setInterval(loadCommunity, 30000);
-    const onVis = () => { if (document.visibilityState === "visible") loadCommunity(); };
+    // The community pool is nice-to-have: log and carry on rather than
+    // blocking the app when it can't be fetched.
+    const pull = () => loadCommunity().catch((e) => console.warn("community pool:", msg(e)));
+    pull();
+    const iv = setInterval(pull, 30000);
+    const onVis = () => { if (document.visibilityState === "visible") pull(); };
     document.addEventListener("visibilitychange", onVis);
     return () => { clearInterval(iv); document.removeEventListener("visibilitychange", onVis); };
   }, [loadCommunity]);
@@ -374,22 +390,32 @@ export default function Simmer() {
   const allRecipes = React.useMemo(() => [...REPO, ...community], [community]);
   const allRecipesRef = useRef(allRecipes); allRecipesRef.current = allRecipes;
 
+  // Every shared write can fail (offline, RLS, unconfigured build). Surface it
+  // instead of dropping it on the floor: a silent failure here is why a
+  // household could look created and store nothing.
+  const persist = useCallback((key, value) => {
+    saveKey(key, value).then(
+      () => setSyncError(null),
+      (e) => setSyncError(e instanceof SyncError ? e.message : String(e?.message || e)),
+    );
+  }, []);
+
   const persistPantry = useCallback((next) => {
     const k = nsKeys(profileRef.current?.code);
-    setPantry(next); saveKey(k.pantry, next, k.shared);
-  }, []);
+    setPantry(next); persist(k.pantry, next);
+  }, [persist]);
   const persistMatches = useCallback((next) => {
     const k = nsKeys(profileRef.current?.code);
-    setMatches(next); saveKey(k.matches, next, k.shared);
-  }, []);
+    setMatches(next); persist(k.matches, next);
+  }, [persist]);
   const persistStaples = useCallback((next) => {
     const k = nsKeys(profileRef.current?.code);
-    setStaples(next); saveKey(k.staples, { v: 27, items: next }, k.shared);
-  }, []);
+    setStaples(next); persist(k.staples, { v: 27, items: next });
+  }, [persist]);
   const persistShopping = useCallback((next) => {
     const k = nsKeys(profileRef.current?.code);
-    setShopping(next); saveKey(k.shopping, next, k.shared);
-  }, []);
+    setShopping(next); persist(k.shopping, next);
+  }, [persist]);
 
   const stockRef = useRef(stockCounts); stockRef.current = stockCounts;
   // learn what the household actually stocks: bump on pantry adds and shopping-list buys
@@ -401,8 +427,8 @@ export default function Simmer() {
       const prev = next[key] || { name: n, cat: cats[n] || localGuess(n) || "other", n: 0 };
       next[key] = { ...prev, name: n, n: prev.n + 1 };
     }
-    setStockCounts(next); saveKey(k.stock, next, k.shared);
-  }, []);
+    setStockCounts(next); persist(k.stock, next);
+  }, [persist]);
 
   const resetSession = useCallback(() => {
     sessionRef.current++;
@@ -439,41 +465,56 @@ export default function Simmer() {
   }, [matchSig, pantry, staples, softReset]);
 
   const createHousehold = async () => {
-    let code = null;
-    for (let i = 0; i < 8 && !code; i++) {
-      const candidate = CODE_WORDS[Math.floor(Math.random() * CODE_WORDS.length)] + "-" + (10 + Math.floor(Math.random() * 90));
-      if (!(await keyExists(`hh:${candidate}:meta`, true))) code = candidate;
+    try {
+      let code = null;
+      for (let i = 0; i < 8 && !code; i++) {
+        const candidate = CODE_WORDS[Math.floor(Math.random() * CODE_WORDS.length)] + "-" + (10 + Math.floor(Math.random() * 90));
+        if (!(await keyExists(`hh:${candidate}:meta`))) code = candidate;
+      }
+      if (!code) return "Couldn't generate a free code, try again.";
+      const k = nsKeys(code);
+      // Seed the household's data first; only claim the code once the writes
+      // landed, so a half-written household can't be joined.
+      await Promise.all([
+        saveKey(k.pantry, pantryRef.current || []),
+        saveKey(k.matches, matchesRef.current || []),
+        saveKey(k.staples, { v: 27, items: staplesRef.current || STAPLES_LIST }),
+        saveKey(k.shopping, shoppingRef.current || []),
+      ]);
+      await saveKey(`hh:${code}:meta`, { createdAt: Date.now() });
+      const prof = { code };
+      setProfile(prof); await saveKey("simmer-profile", prof);
+      setSyncError(null);
+      resetSession();
+      return null;
+    } catch (e) {
+      return msg(e);
     }
-    if (!code) return "Couldn't generate a code, try again.";
-    await saveKey(`hh:${code}:meta`, { createdAt: Date.now() }, true);
-    const k = nsKeys(code);
-    await Promise.all([
-      saveKey(k.pantry, pantryRef.current || [], true),
-      saveKey(k.matches, matchesRef.current || [], true),
-      saveKey(k.staples, { v: 27, items: staplesRef.current || STAPLES_LIST }, true),
-      saveKey(k.shopping, shoppingRef.current || [], true),
-    ]);
-    const prof = { code };
-    setProfile(prof); await saveKey("simmer-profile", prof);
-    resetSession();
-    return null;
   };
 
   const joinHousehold = async (raw) => {
     const code = raw.trim().toUpperCase();
     if (!code) return "Enter a code.";
-    if (!(await keyExists(`hh:${code}:meta`, true))) return "Household not found. Check the code.";
-    const prof = { code };
-    setProfile(prof); await saveKey("simmer-profile", prof);
-    await loadNamespace(code);
-    resetSession();
-    return null;
+    try {
+      // keyExists now throws if the server is unreachable, so a genuine
+      // "false" here really does mean no such household.
+      if (!(await keyExists(`hh:${code}:meta`))) return "Household not found. Check the code.";
+      await loadNamespace(code);
+      const prof = { code };
+      setProfile(prof); await saveKey("simmer-profile", prof);
+      setSyncError(null);
+      resetSession();
+      return null;
+    } catch (e) {
+      return msg(e);
+    }
   };
 
   const leaveHousehold = async () => {
     const prof = { code: null };
     setProfile(prof); await saveKey("simmer-profile", prof);
-    await loadNamespace(null);
+    await loadNamespace(null).catch(() => {});
+    setSyncError(null);
     resetSession();
   };
 
@@ -559,7 +600,13 @@ export default function Simmer() {
   useEffect(() => {
     const code = profile?.code;
     if (!code) return;
-    const refresh = () => loadNamespace(code);
+    // A failed refresh must leave state alone. Falling back to empty here and
+    // then persisting a later edit would overwrite the household's real data.
+    const refresh = () =>
+      loadNamespace(code).then(
+        () => setSyncError(null),
+        (e) => setSyncError(msg(e)),
+      );
     const iv = setInterval(refresh, 20000);
     const onVis = () => { if (document.visibilityState === "visible") refresh(); };
     document.addEventListener("visibilitychange", onVis);
@@ -601,6 +648,7 @@ export default function Simmer() {
       )}
       {hhOpen && (
         <HouseholdPanel
+          syncError={syncError}
           code={profile.code} poolCount={community.length}
           onCreate={createHousehold} onJoin={joinHousehold}
           onLeave={leaveHousehold} onClose={() => setHhOpen(false)}
@@ -747,7 +795,7 @@ function MatchFlash({ card, onCook }) {
 
 /* ------------------------- household panel ------------------------ */
 
-function HouseholdPanel({ code, poolCount, onCreate, onJoin, onLeave, onClose }) {
+function HouseholdPanel({ code, poolCount, syncError, onCreate, onJoin, onLeave, onClose }) {
   const [joinCode, setJoinCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
@@ -782,6 +830,18 @@ function HouseholdPanel({ code, poolCount, onCreate, onJoin, onLeave, onClose })
           }}>✕</button>
         </div>
 
+        {!syncConfigured && (
+          <p style={{
+            background: C.redSoft, color: C.red, borderRadius: 10, padding: "10px 12px",
+            fontSize: 13, fontWeight: 600, margin: "0 0 12px", lineHeight: 1.45,
+          }}>
+            {configError
+              ? `Household sync is misconfigured — nothing will be shared. ${configError}`
+              : "Household sync isn't set up for this build — nothing will be shared. " +
+                "Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in Vercel, then redeploy."}
+          </p>
+        )}
+
         {code ? (
           <>
             <p style={{ fontSize: 14, color: C.faint, margin: "0 0 10px" }}>
@@ -807,11 +867,11 @@ function HouseholdPanel({ code, poolCount, onCreate, onJoin, onLeave, onClose })
             <p style={{ fontSize: 14, color: C.faint, margin: "0 0 14px" }}>
               You're in solo mode: your pantry is private to you. Create a household to share one pantry with your people, or join theirs with a code.
             </p>
-            <button onClick={doCreate} disabled={busy} style={{
+            <button onClick={doCreate} disabled={busy || !syncConfigured} style={{
               width: "100%", padding: "12px 0", borderRadius: 12, border: "none",
               background: `linear-gradient(135deg, ${C.green}, #0DA35C)`, color: "#fff",
               fontFamily: "inherit", fontWeight: 700, fontSize: 14, cursor: "pointer",
-              marginBottom: 12, opacity: busy ? 0.6 : 1,
+              marginBottom: 12, opacity: busy || !syncConfigured ? 0.6 : 1,
             }}>{busy ? "Working…" : "Create a household (takes your current pantry)"}</button>
             <div style={{ display: "flex", gap: 8 }}>
               <input
@@ -825,10 +885,10 @@ function HouseholdPanel({ code, poolCount, onCreate, onJoin, onLeave, onClose })
                   textTransform: "uppercase",
                 }}
               />
-              <button onClick={doJoin} disabled={busy} style={{
+              <button onClick={doJoin} disabled={busy || !syncConfigured} style={{
                 padding: "0 16px", borderRadius: 12, border: `1.5px solid ${C.green}`,
                 background: "#fff", color: C.green, fontFamily: "inherit", fontWeight: 700,
-                fontSize: 14, cursor: "pointer", opacity: busy ? 0.6 : 1,
+                fontSize: 14, cursor: "pointer", opacity: busy || !syncConfigured ? 0.6 : 1,
               }}>Join</button>
             </div>
             <p style={{ fontSize: 12, color: C.faint, margin: "10px 0 0" }}>
@@ -836,7 +896,11 @@ function HouseholdPanel({ code, poolCount, onCreate, onJoin, onLeave, onClose })
             </p>
           </>
         )}
-        {err && <p style={{ color: C.red, fontSize: 13, fontWeight: 600, margin: "10px 0 0" }}>{err}</p>}
+        {(err || syncError) && (
+          <p style={{ color: C.red, fontSize: 13, fontWeight: 600, margin: "10px 0 0", lineHeight: 1.45 }}>
+            {err || syncError}
+          </p>
+        )}
         {poolCount > 0 && (
           <p style={{ fontSize: 12, color: C.faint, margin: "12px 0 0", textAlign: "center" }}>
             📚 {poolCount} recipes in the community pool
@@ -919,7 +983,11 @@ function RecipeSheet({ community, onSave, onDelete, onClose }) {
       desc: form.desc.trim() || "A household original.", tags: ["custom"],
       ingredients: core, serves, ingFull: ing, steps, macros, custom: true,
     };
-    await onSave([entry]);
+    try {
+      await onSave([entry]);
+    } catch (e) {
+      return setErr(msg(e)); // keep the form populated so nothing is retyped
+    }
     setForm(empty); setEditingId(null);
   };
 
@@ -985,7 +1053,7 @@ function RecipeSheet({ community, onSave, onDelete, onClose }) {
                   <div style={{ fontSize: 11.5, color: C.faint, textTransform: "capitalize" }}>{r.cuisine} · {r.minutes} min · serves {r.serves}</div>
                 </span>
                 <button onClick={() => startEdit(r)} aria-label={`Edit ${r.name}`} style={{ border: "none", background: "#F3F1E8", borderRadius: 8, padding: "6px 9px", cursor: "pointer", fontSize: 13 }}>✏️</button>
-                <button onClick={() => onDelete(r.repoId)} aria-label={`Delete ${r.name}`} style={{ border: "none", background: C.redSoft, color: C.red, borderRadius: 8, padding: "6px 9px", cursor: "pointer", fontSize: 13, fontWeight: 800 }}>✕</button>
+                <button onClick={() => onDelete(r.repoId).catch((e) => setErr(msg(e)))} aria-label={`Delete ${r.name}`} style={{ border: "none", background: C.redSoft, color: C.red, borderRadius: 8, padding: "6px 9px", cursor: "pointer", fontSize: 13, fontWeight: 800 }}>✕</button>
               </div>
             ))}
           </>

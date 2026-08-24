@@ -13,7 +13,7 @@ per-use costs — recipe matching runs entirely on-device. Installable on phones
 
 ### 1. Supabase (3 min)
 1. Create a new project at supabase.com.
-2. Open **SQL Editor**, paste the contents of `supabase/schema.sql`, hit **Run**.
+2. Open **SQL Editor**, paste the contents of `schema.sql`, hit **Run**.
 3. Go to **Project Settings → API** and copy:
    - Project URL (like `https://abcd1234.supabase.co`)
    - `anon` public key
