@@ -114,18 +114,37 @@ function localGuess(name) {
 // user-facing message; anything else is unexpected.
 const msg = (e) => (e instanceof SyncError ? e.message : `Something went wrong: ${e?.message || e}`);
 
+// Storage keys for one namespace: a household (`hh:CODE:*`, in Supabase) or
+// solo mode (`simmer-*`, in localStorage). storage.js routes on the prefix.
+//
+// INVARIANT: never write a namespace that hasn't been read successfully.
+// Writes replace the whole value rather than merging, so writing data that
+// came from somewhere else — solo data, or a stale deck — silently destroys
+// whatever the household actually had. `loadedCodeRef` below enforces this.
 const nsKeys = (code) => ({
   pantry: code ? `hh:${code}:pantry` : "simmer-pantry",
   matches: code ? `hh:${code}:matches` : "simmer-matches",
   staples: code ? `hh:${code}:staples` : "simmer-staples",
   shopping: code ? `hh:${code}:shopping` : "simmer-shopping",
   stock: code ? `hh:${code}:stock-counts` : "simmer-stock-counts",
-  shared: !!code,
 });
 
+/* ==================================================================
+   Ingredient matching
+
+   Recipes list ingredients as free text ("garlic cloves", "black
+   pepper") and so does the pantry, so matching is string work, not id
+   lookup. Everything below exists to make "2 garlic cloves" match a
+   pantry entry of "garlic" without also matching "peanut butter" to a
+   staple of "butter".
+   ================================================================== */
+
+// Cheap key for dedupe/lookup. Not used for matching — tokenize is.
 const norm = (s) => s.toLowerCase().trim().replace(/s$/, "");
 
-// token-level plural-aware comparison
+// Split into comparable word tokens: drop parentheticals ("(optional)") and
+// punctuation, then singularise so "tomatoes"/"tomato" and "berries"/"berry"
+// land on the same token.
 const tokenize = (s) =>
   s.toLowerCase()
     .replace(/\(.*?\)/g, " ")
@@ -142,16 +161,29 @@ const AMBIGUOUS_HEADS = new Set(["pepper", "milk", "butter", "clove"]);
 const TRAILING_FORMS = new Set(["cheese", "leaf", "leave", "clove", "stalk", "sprig", "head", "bulb", "seed"]);
 const stripForm = (t) => (t.length >= 2 && TRAILING_FORMS.has(t[t.length - 1]) ? t.slice(0, -1) : t);
 
+// True when two token lists name the same ingredient.
+//
+// The rule is subset-on-a-shared-head: the last token is the noun being
+// named, so it must agree, and the shorter phrase's words must all appear
+// in the longer one. That lets "garlic" match "fresh garlic" while keeping
+// "chicken stock" away from "vegetable stock" (heads agree, but "chicken"
+// isn't in the other phrase — so neither is a subset of the other).
 function tokensMatch(ta, tb) {
   if (!ta.length || !tb.length) return false;
   if (ta.join(" ") === tb.join(" ")) return true;
   if (ta[ta.length - 1] !== tb[tb.length - 1]) return false; // head nouns must agree
   const [short, long] = ta.length <= tb.length ? [ta, tb] : [tb, ta];
+  // A bare ambiguous head must not swallow a modified compound: a staple of
+  // "butter" should not mark "peanut butter" as already covered.
   if (short.length === 1 && long.length > 1 && AMBIGUOUS_HEADS.has(short[0])) return false;
   const ls = new Set(long);
   return short.every((w) => ls.has(w));
 }
 
+// Match on the raw tokens first; if that fails and either side ends in a
+// form noun ("cloves", "leaves"), retry with it stripped. Two passes rather
+// than always stripping, so "bay leaf" keeps its head when compared to
+// another leaf.
 function ingMatch(a, b) {
   const ta = tokenize(a), tb = tokenize(b);
   if (tokensMatch(ta, tb)) return true;
@@ -163,6 +195,12 @@ function ingMatch(a, b) {
 function ingInList(ing, list) {
   return list.some((x) => ingMatch(ing, x));
 }
+// Sort a recipe's core ingredients into four buckets against the pantry:
+//   uses     — in the pantry (or reachable via a substitution)
+//   missing  — not in pantry, not a staple, no usable substitute
+//   rescues  — uses that are flagged "use soon", worth surfacing
+//   swaps    — {need, have} pairs where a substitution was applied
+// Staples are assumed on hand and deliberately land in none of them.
 function computeFit(recipe, pantry, staples) {
   const pNames = pantry.map((p) => p.name);
   const soon = pantry.filter((p) => p.useSoon).map((p) => p.name);
@@ -193,6 +231,14 @@ function computeFit(recipe, pantry, staples) {
 let uidCounter = 0;
 const uid = () => Date.now() + "-" + (uidCounter++);
 
+/* ==================================================================
+   Deck selection
+
+   Picks the next `count` cards. Two stages: score every candidate,
+   then choose from the ranked list. Scoring is a single "tier" number
+   built from penalties and bonuses — lower tier is better, and score
+   is its negation plus jitter, so higher score wins.
+   ================================================================== */
 function pickFromRepo(recipes, { pantry, staples, mode, exclude, swipes, cuisines = [], maxTime = null, mealType = null, count = 5 }) {
   const liked = new Set(swipes.filter((s) => s.dir === "right").map((s) => (s.cuisine || "").toLowerCase()));
   const passed = new Set(swipes.filter((s) => s.dir === "left").map((s) => (s.cuisine || "").toLowerCase()));
@@ -224,13 +270,18 @@ function pickFromRepo(recipes, { pantry, staples, mode, exclude, swipes, cuisine
       if (c.fit.rescues.length) tier -= 5;
       // Time-of-day: boost matching meal type when no manual meal filter is set
       if (!mealType && timeMeals.includes(c.r.mealType)) tier -= 15;
-      // Random within tier for variety on every shuffle
+      // Jitter for variety between shuffles. Note the range (0–50) is wider
+      // than the pantry-use step (40), so this can occasionally reorder
+      // across one "uses" step — deliberate, it keeps decks from being
+      // identical, but it means ranking is not strictly deterministic.
       const score = -tier + Math.random() * 50;
       return { ...c, score };
     })
     .sort((a, b) => b.score - a.score);
 
-  // Pick phase: pantry-using recipes first, then cuisine diversity for the rest
+  // Pick phase. Diversify only when nothing else is steering the deck: no
+  // cuisine filter, and no swipe history to learn a preference from. Once
+  // the user has expressed a taste, honour it instead of spreading wide.
   const hasVibe = liked.size > 0;
   const diversify = mode === "flexible" && !wanted.size && !hasVibe;
   let picks;
@@ -260,6 +311,8 @@ function pickFromRepo(recipes, { pantry, staples, mode, exclude, swipes, cuisine
     }
   } else {
     picks = candidates.slice(0, count);
+    // When every pick came from an already-liked cuisine, swap the last one
+    // for something outside it — stops the deck narrowing to one cuisine.
     if (!wanted.size && liked.size && picks.length === count) {
       const wild = candidates.find(
         (c) => !liked.has((c.r.cuisine || "").toLowerCase()) && !picks.includes(c)
@@ -275,7 +328,17 @@ function pickFromRepo(recipes, { pantry, staples, mode, exclude, swipes, cuisine
   }));
 }
 
-/* ------------------------------ App ------------------------------- */
+/* ==================================================================
+   App
+
+   Owns all persisted state and the sync lifecycle. The tab components
+   below are presentational: they receive values and persist* callbacks
+   and never touch storage.js directly.
+
+   Two storage namespaces exist — solo (localStorage) and household
+   (Supabase) — and exactly one is live at a time, chosen by
+   profile.code. See nsKeys for the invariant that governs writes.
+   ================================================================== */
 
 export default function Simmer() {
   const [tab, setTab] = useState("swipe");
@@ -295,7 +358,8 @@ export default function Simmer() {
   // last household-sync failure, surfaced in the household panel
   const [syncError, setSyncError] = useState(null);
 
-  // session-only
+  // Session-only state: never persisted, reset on household change and on
+  // any change that invalidates the current deck.
   const [deck, setDeck] = useState([]);
   const [swipes, setSwipes] = useState([]);
   const [seen, setSeen] = useState([]);
@@ -309,12 +373,23 @@ export default function Simmer() {
   const maxTimeRef = useRef(maxTime); maxTimeRef.current = maxTime;
   const mealTypeRef = useRef(mealType); mealTypeRef.current = mealType;
 
+  // Mirrors of persisted state. The persist*/deal callbacks are memoised and
+  // run from timers and event handlers, so they read current values through
+  // these refs rather than capturing them in a stale closure.
   const pantryRef = useRef(pantry); pantryRef.current = pantry;
   const matchesRef = useRef(matches); matchesRef.current = matches;
   const staplesRef = useRef(staples); staplesRef.current = staples;
   const profileRef = useRef(profile); profileRef.current = profile;
   const shoppingRef = useRef(shopping); shoppingRef.current = shopping;
 
+  // Which namespace the in-memory state was actually loaded from: a household
+  // code, or null for solo. `undefined` means nothing has loaded yet. Writes
+  // are refused whenever this disagrees with profile.code — see persistNs.
+  const loadedCodeRef = useRef(undefined);
+
+  // Load every persisted value for one namespace and install it in state.
+  // Throws if a shared read fails — callers must handle that, because the
+  // alternative (falling back to empty) is what used to overwrite real data.
   const loadNamespace = useCallback(async (code) => {
     const k = nsKeys(code);
     const [p, m, s, sh, sc] = await Promise.all([
@@ -324,6 +399,12 @@ export default function Simmer() {
       loadKey(k.shopping, []),
       loadKey(k.stock, {}),
     ]);
+    // Staples migration. Older builds stored a bare array; current builds
+    // store {v, items}. Two cases are handled differently on purpose:
+    //   - an untouched legacy default set is replaced wholesale, so users who
+    //     never customised it get the new defaults
+    //   - a customised set is preserved and only gains genuinely new items,
+    //     so nobody's edits are discarded
     // staples stored either as legacy array or versioned {v, items}
     let sItems = Array.isArray(s) ? s : (s?.items || STAPLES_LIST);
     let sVer = Array.isArray(s) ? 0 : (s?.v || 0);
@@ -337,6 +418,9 @@ export default function Simmer() {
     const migrated = sItems;
     if (sVer < 27 || Array.isArray(s)) saveKey(k.staples, { v: 27, items: migrated }).catch(() => {});
     setPantry(p); setMatches(m); setStaples(migrated); setShopping(sh); setStockCounts(sc || {});
+    // Only now does state genuinely represent this namespace, so only now is
+    // it safe to write back to it. On a throw above we never reach this line.
+    loadedCodeRef.current = code ?? null;
   }, []);
 
   useEffect(() => {
@@ -346,9 +430,16 @@ export default function Simmer() {
       try {
         await loadNamespace(prof.code);
       } catch (e) {
-        // Household unreachable at boot. Fall back to solo data so the app is
-        // usable, but keep the code so the user can retry, and say why.
-        setSyncError(msg(e));
+        // Household unreachable at boot. Show solo data so the app still
+        // works, and keep the code so the 20s refresh keeps retrying. Because
+        // loadedCodeRef now says "solo" while profile.code says "household",
+        // persistNs refuses every write until a refresh succeeds — which is
+        // what stops this solo data being written over the household's.
+        setSyncError(
+          `Can't reach household ${prof.code} — ${msg(e)} ` +
+          `Showing your solo pantry meanwhile; edits are paused so nothing ` +
+          `gets overwritten.`,
+        );
         await loadNamespace(null).catch(() => {});
       }
     })();
@@ -365,7 +456,6 @@ export default function Simmer() {
     const latest = await loadKey(COMMUNITY_KEY, []);
     const byId = new Map((Array.isArray(latest) ? latest : []).map((r) => [r.repoId, r]));
     for (const r of nextList) byId.set(r.repoId, r);
-    for (const id of [...byId.keys()]) if (!nextList.some((r) => r.repoId === id) && nextList.__deleted?.includes(id)) byId.delete(id);
     const merged = [...byId.values()];
     await saveKey(COMMUNITY_KEY, merged);
     setCommunity(merged.filter((r) => !repoIds.has(r.repoId)));
@@ -400,45 +490,48 @@ export default function Simmer() {
     );
   }, []);
 
-  const persistPantry = useCallback((next) => {
-    const k = nsKeys(profileRef.current?.code);
-    setPantry(next); persist(k.pantry, next);
+  // Update local state and write it back, but only if state actually came from
+  // the namespace we're about to write. If a household failed to load, state
+  // holds solo data (or a previous household's) and writing it would overwrite
+  // the real thing — so refuse, and say so, rather than showing an edit that
+  // is about to be destroyed or silently dropped.
+  const persistNs = useCallback((field, value, setLocal, stored) => {
+    const code = profileRef.current?.code ?? null;
+    if (loadedCodeRef.current !== code) {
+      setSyncError(
+        code
+          ? `Not synced with household ${code} yet — that change wasn't saved. ` +
+            `It'll save normally once the household loads.`
+          : "Still loading — that change wasn't saved. Try again in a moment.",
+      );
+      return;
+    }
+    setLocal(value);
+    persist(nsKeys(code)[field], stored === undefined ? value : stored);
   }, [persist]);
-  const persistMatches = useCallback((next) => {
-    const k = nsKeys(profileRef.current?.code);
-    setMatches(next); persist(k.matches, next);
-  }, [persist]);
-  const persistStaples = useCallback((next) => {
-    const k = nsKeys(profileRef.current?.code);
-    setStaples(next); persist(k.staples, { v: 27, items: next });
-  }, [persist]);
-  const persistShopping = useCallback((next) => {
-    const k = nsKeys(profileRef.current?.code);
-    setShopping(next); persist(k.shopping, next);
-  }, [persist]);
+
+  const persistPantry = useCallback((next) => persistNs("pantry", next, setPantry), [persistNs]);
+  const persistMatches = useCallback((next) => persistNs("matches", next, setMatches), [persistNs]);
+  const persistStaples = useCallback((next) => persistNs("staples", next, setStaples, { v: 27, items: next }), [persistNs]);
+  const persistShopping = useCallback((next) => persistNs("shopping", next, setShopping), [persistNs]);
 
   const stockRef = useRef(stockCounts); stockRef.current = stockCounts;
   // learn what the household actually stocks: bump on pantry adds and shopping-list buys
   const bumpStock = useCallback((names, cats = {}) => {
-    const k = nsKeys(profileRef.current?.code);
     const next = { ...stockRef.current };
     for (const n of names) {
       const key = norm(n);
       const prev = next[key] || { name: n, cat: cats[n] || localGuess(n) || "other", n: 0 };
       next[key] = { ...prev, name: n, n: prev.n + 1 };
     }
-    setStockCounts(next); persist(k.stock, next);
-  }, [persist]);
+    persistNs("stock", next, setStockCounts);
+  }, [persistNs]);
 
   const resetSession = useCallback(() => {
     sessionRef.current++;
     setDeck([]); setSwipes([]); setSeen([]); setHistory([]); setExhausted(null);
   }, []);
   const softReset = useCallback(() => {
-    sessionRef.current++;
-    setDeck([]); setSeen([]); setExhausted(null);
-  }, []);
-  const modeReset = useCallback(() => {
     sessionRef.current++;
     setDeck([]); setSeen([]); setExhausted(null);
   }, []);
@@ -482,6 +575,9 @@ export default function Simmer() {
         saveKey(k.shopping, shoppingRef.current || []),
       ]);
       await saveKey(`hh:${code}:meta`, { createdAt: Date.now() });
+      // The writes above seeded this household *from* current state, so state
+      // and namespace already agree — no reload needed before writes resume.
+      loadedCodeRef.current = code;
       const prof = { code };
       setProfile(prof); await saveKey("simmer-profile", prof);
       setSyncError(null);
@@ -535,7 +631,9 @@ export default function Simmer() {
         return;
       }
       if (append) return; // topping up an existing deck; silence is fine
-      // Nothing matched: figure out why and how to help.
+      // Nothing matched. Work out which single ingredient would unlock the
+      // most recipes: look at recipes that are exactly one over the current
+      // tolerance, and count how often each missing ingredient appears.
       const filterPass = allRecipes
         .filter((r) => { const w = cuisinesRef.current.map((c) => c.toLowerCase()); return !w.length || w.includes(r.cuisine); })
         .filter((r) => !maxTimeRef.current || r.minutes <= maxTimeRef.current)
@@ -596,7 +694,10 @@ export default function Simmer() {
     });
   }, [persistMatches]);
 
-  // keep household data fresh across devices: refetch on focus + every 20s
+  // Keep household data fresh across devices: refetch on focus and every 20s.
+  // This is last-write-wins with no merge — a value edited on two devices
+  // inside one interval keeps whichever wrote last. Fine for a shared pantry;
+  // it would not be for anything where a lost edit matters.
   useEffect(() => {
     const code = profile?.code;
     if (!code) return;
@@ -674,7 +775,7 @@ export default function Simmer() {
           setCuisines={(next) => { setCuisines(next); softReset(); }}
           setMaxTime={(t) => { setMaxTime(t); softReset(); }}
           setMealType={(t) => { setMealType(t); softReset(); }}
-          setMode={(m) => { setMode(m); modeReset(); }}
+          setMode={(m) => { setMode(m); softReset(); }}
           onDeal={() => dealCards(swipes, seen, false)}
           onSwipe={handleSwipe} onReset={resetSession}
           goPantry={() => setTab("pantry")}
