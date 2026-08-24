@@ -1,4 +1,5 @@
-// Simmer recipe repository — 405 vegetarian (egg-free) recipes across 31 cuisine tracks + fusion.
+// Simmer recipe repository — vegetarian (egg-free) recipes across 31 cuisine tracks + fusion.
+// Every cuisine carries at least 15 recipes; keep it that way when adding tracks.
 // Edit any batch file to update recipes; keep ids unique.
 import b1 from "./recipes1.js";
 import b2 from "./recipes2.js";
@@ -13,7 +14,8 @@ import b10 from "./recipes10.js";
 import b11 from "./recipes11.js";
 import b12 from "./recipes12.js";
 import b13 from "./recipes13.js";
+import b14 from "./recipes14.js";
 
-export const RECIPES = [...b1, ...b2, ...b3, ...b4, ...b5, ...b6, ...b7, ...b8, ...b9, ...b10, ...b11, ...b12, ...b13];
+export const RECIPES = [...b1, ...b2, ...b3, ...b4, ...b5, ...b6, ...b7, ...b8, ...b9, ...b10, ...b11, ...b12, ...b13, ...b14];
 
 export const CUISINES = [...new Set(RECIPES.map((r) => r.cuisine))];
