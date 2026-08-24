@@ -1772,7 +1772,6 @@ function ModeToggle({ mode, setMode }) {
 function SwipeCard({ card, index, onSwipe, topId, isLast, unlock }) {
   const [drag, setDrag] = useState({ x: 0, y: 0, active: false });
   const [leaving, setLeaving] = useState(null);
-  const [flipped, setFlipped] = useState(false);
   const start = useRef(null);
   const isTop = card.id === topId;
 
@@ -1798,7 +1797,7 @@ function SwipeCard({ card, index, onSwipe, topId, isLast, unlock }) {
       setLeaving(dir);
       setTimeout(() => onSwipe(card, dir), 180);
     } else {
-      if (Math.abs(x) < 8 && Math.abs(y) < 8 && dt < 350) setFlipped((f) => !f);
+      // tap does nothing — card is scrollable
       setDrag({ x: 0, y: 0, active: false });
     }
   };
@@ -1815,7 +1814,7 @@ function SwipeCard({ card, index, onSwipe, topId, isLast, unlock }) {
       onPointerUp={onUp}
       onPointerCancel={onUp}
       style={{
-        position: "absolute", inset: 0, touchAction: "none",
+        position: "absolute", inset: 0, touchAction: "pan-y",
         transform: `translate(${x}px, ${drag.y * 0.15}px) rotate(${rot}deg) scale(${1 - index * 0.035}) translateY(${index * 10}px)`,
         transition: drag.active && !leaving ? "none" : "transform .25s ease, opacity .2s ease",
         opacity: leaving ? 0 : 1,
@@ -1835,15 +1834,20 @@ function SwipeCard({ card, index, onSwipe, topId, isLast, unlock }) {
             <Stamp label="SKIP" color={C.red} side="right" opacity={drag.x < 0 ? stampOpacity : 0} />
           </>
         )}
-        {!flipped ? (
-          <>
+        <>
             <div style={{
               background: `linear-gradient(140deg, ${tintFor(card.cuisine)} 0%, #FFFFFF 140%)`,
               padding: "12px 16px 10px",
               display: "flex", flexDirection: "column", gap: 6, flexShrink: 0,
             }}>
-              <div style={{ fontSize: 36, lineHeight: 1, filter: "drop-shadow(0 2px 4px rgba(0,0,0,.12))" }}>{card.emoji}</div>
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontSize: 32, lineHeight: 1 }}>{card.emoji}</span>
+                <h2 style={{
+                  fontFamily: "'Fraunces', serif", fontWeight: 800, fontSize: 21,
+                  lineHeight: 1.12, margin: 0, letterSpacing: "-0.01em", flex: 1,
+                }}>{card.name}</h2>
+              </div>
+              <div style={{ display: "flex", gap: 5, flexWrap: "wrap", alignItems: "center" }}>
                 <span style={pill("#FFFFFFB0", C.ink)}>{card.cuisine}</span>
                 <span style={pill("#FFFFFFB0", C.ink)}>⏱ {card.minutes} min</span>
                 {mealMeta && <span style={pill("#FFFFFFB0", C.ink)}>{mealMeta.emoji} {mealMeta.label}</span>}
@@ -1851,34 +1855,56 @@ function SwipeCard({ card, index, onSwipe, topId, isLast, unlock }) {
                 {card.custom && <span style={pill(C.gold, "#fff")}>🏠 custom</span>}
               </div>
             </div>
-            <div style={{ padding: "12px 18px 14px", flex: 1, display: "flex", flexDirection: "column", gap: 8, overflow: "hidden", touchAction: "none" }}>
-              <h2 style={{
-                fontFamily: "'Fraunces', serif", fontWeight: 800, fontSize: 23,
-                lineHeight: 1.12, margin: 0, letterSpacing: "-0.01em", flexShrink: 0,
-              }}>{card.name}</h2>
-              <p style={{ margin: 0, color: C.faint, fontSize: 14, lineHeight: 1.45, flexShrink: 0 }}>{card.desc}</p>
+            <div style={{ padding: "10px 16px 14px", flex: 1, display: "flex", flexDirection: "column", gap: 6, overflowY: "auto", WebkitOverflowScrolling: "touch" }}>
+              <p style={{ margin: 0, color: C.faint, fontSize: 13.5, lineHeight: 1.4, flexShrink: 0 }}>{card.desc}</p>
               {card.rescues?.length > 0 && (
-                <div style={{ background: C.goldSoft, borderRadius: 10, padding: "7px 10px", fontSize: 12.5, fontWeight: 700, color: "#9A6700", flexShrink: 0 }}>
-                  ⏰ Rescues your {card.rescues.join(", ")}
+                <div style={{ background: C.goldSoft, borderRadius: 10, padding: "6px 10px", fontSize: 12, fontWeight: 700, color: "#9A6700", flexShrink: 0 }}>
+                  ⏰ Rescues: {card.rescues.join(", ")}
                 </div>
               )}
-              <div style={{ marginTop: "auto", display: "flex", flexDirection: "column", gap: 5, overflow: "hidden" }}>
-                {card.uses?.length > 0 && (
-                  <IngRow label="You have" color={C.green} items={card.uses} />
-                )}
-                {card.missing?.length > 0 && (
-                  <IngRow label="You'd need" color={C.red} items={card.missing} />
-                )}
+              <div style={{ display: "flex", flexDirection: "column", gap: 4, flexShrink: 0 }}>
+                {card.uses?.length > 0 && <IngRow label="You have" color={C.green} items={card.uses} />}
+                {card.missing?.length > 0 && <IngRow label="Need" color={C.red} items={card.missing} />}
                 {card.swaps?.length > 0 && (
-                  <div style={{ fontSize: 12, lineHeight: 1.45 }}>
+                  <div style={{ fontSize: 12, lineHeight: 1.4 }}>
                     <span style={{ fontWeight: 800, color: C.gold }}>Swap: </span>
                     <span style={{ color: C.faint }}>{card.swaps.map((s) => `${s.need} → your ${s.have}`).join(", ")}</span>
                   </div>
                 )}
               </div>
+              <div style={{ height: 1, background: C.line, margin: "4px 0", flexShrink: 0 }} />
+              <div style={{ fontSize: 11.5, fontWeight: 800, color: C.faint, textTransform: "uppercase", letterSpacing: "0.05em", flexShrink: 0 }}>
+                Ingredients · serves {card.serves || 2}
+              </div>
+              <div style={{ display: "flex", gap: 4, flexWrap: "wrap", flexShrink: 0 }}>
+                {(card.ingFull || []).map((row, i) => {
+                  const qty = row[0] != null ? row[0] : "";
+                  const unit = row[1] || "";
+                  const name = row[2] || "";
+                  const displayText = [qty, unit, name].filter(Boolean).join(" ");
+                  return (
+                    <span key={i} style={{
+                      background: "#FFFFFFD0", border: `1px solid ${C.line}`,
+                      borderRadius: 99, padding: "3px 9px", fontSize: 12, fontWeight: 600, color: C.ink,
+                    }}>{displayText}</span>
+                  );
+                })}
+              </div>
+              <div style={{ height: 1, background: C.line, margin: "4px 0", flexShrink: 0 }} />
+              <div style={{ fontSize: 11.5, fontWeight: 800, color: C.faint, textTransform: "uppercase", letterSpacing: "0.05em", flexShrink: 0 }}>
+                Steps
+              </div>
+              <ol style={{ margin: 0, paddingLeft: 18, fontSize: 13, lineHeight: 1.5, color: C.ink, flexShrink: 0 }}>
+                {(card.steps || []).map((s, i) => <li key={i} style={{ marginBottom: 4 }}>{s}</li>)}
+              </ol>
+              {card.macros && (
+                <div style={{ fontSize: 11.5, color: C.faint, flexShrink: 0, marginTop: 2 }}>
+                  {card.macros.cal} cal · {card.macros.p}g protein · {card.macros.c}g carbs · {card.macros.f}g fat per serving
+                </div>
+              )}
               {isLast && unlock && (
                 <div style={{
-                  background: C.goldSoft, borderRadius: 10, padding: "7px 12px", marginTop: 6,
+                  background: C.goldSoft, borderRadius: 10, padding: "6px 12px", marginTop: 4,
                   fontSize: 12, fontWeight: 700, color: "#9A6700", textAlign: "center", flexShrink: 0,
                 }}>
                   Last card — adding <span style={{ textTransform: "capitalize" }}>{unlock.name}</span> unlocks +{unlock.count} more
@@ -1886,37 +1912,6 @@ function SwipeCard({ card, index, onSwipe, topId, isLast, unlock }) {
               )}
             </div>
           </>
-        ) : (
-          <div style={{
-            padding: "16px 18px", flex: 1, display: "flex", flexDirection: "column", gap: 8,
-            overflow: "hidden", touchAction: "none",
-            background: `linear-gradient(160deg, ${tintFor(card.cuisine)}, #FFFFFF)`,
-          }}>
-            <h2 style={{
-              fontFamily: "'Fraunces', serif", fontWeight: 800, fontSize: 19,
-              lineHeight: 1.15, margin: 0, flexShrink: 0,
-            }}>{card.emoji} {card.name}</h2>
-            <div style={{ fontSize: 12, fontWeight: 800, color: C.faint, textTransform: "uppercase", letterSpacing: "0.05em", flexShrink: 0 }}>
-              Everything it needs
-            </div>
-            <div style={{ display: "flex", gap: 5, flexWrap: "wrap", overflow: "auto" }}>
-              {(card.ingredients || []).map((ing) => {
-                const have = card.uses?.some((u) => norm(u) === norm(ing) || norm(u).includes(norm(ing)) || norm(ing).includes(norm(u)));
-                return (
-                  <span key={ing} style={{
-                    background: have ? "#FFFFFFD0" : C.redSoft,
-                    border: `1.5px solid ${have ? C.green + "55" : C.red + "55"}`,
-                    color: have ? C.ink : C.red,
-                    borderRadius: 99, padding: "4px 10px", fontSize: 12.5, fontWeight: 700,
-                  }}>{have ? "✓" : "🛒"} {ing}</span>
-                );
-              })}
-            </div>
-            <p style={{ margin: "auto 0 0", fontSize: 11, color: C.faint, flexShrink: 0, opacity: 0.7 }}>
-              tap to flip · swipe to decide
-            </p>
-          </div>
-        )}
       </div>
     </div>
   );
