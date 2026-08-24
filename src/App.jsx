@@ -127,6 +127,9 @@ const nsKeys = (code) => ({
   staples: code ? `hh:${code}:staples` : "simmer-staples",
   shopping: code ? `hh:${code}:shopping` : "simmer-shopping",
   stock: code ? `hh:${code}:stock-counts` : "simmer-stock-counts",
+  // Cook history. Separate from matches on purpose: clearing matches must not
+  // erase the record of what was actually cooked.
+  cooked: code ? `hh:${code}:cooked` : "simmer-cooked",
 });
 
 /* ==================================================================
@@ -400,8 +403,10 @@ export default function Simmer() {
   const [shopping, setShopping] = useState([]);
   const [stockCounts, setStockCounts] = useState({});
   const [community, setCommunity] = useState([]);
+  const [cooked, setCooked] = useState([]);
   const [recipeSheet, setRecipeSheet] = useState(false);
   const [favSheet, setFavSheet] = useState(false);
+  const [cookedSheet, setCookedSheet] = useState(false);
   const [mode, setMode] = useState("flexible");
   const [hhOpen, setHhOpen] = useState(false);
   const [matchFlash, setMatchFlash] = useState(null);
@@ -432,6 +437,7 @@ export default function Simmer() {
   const staplesRef = useRef(staples); staplesRef.current = staples;
   const profileRef = useRef(profile); profileRef.current = profile;
   const shoppingRef = useRef(shopping); shoppingRef.current = shopping;
+  const cookedRef = useRef(cooked); cookedRef.current = cooked;
 
   // Which namespace the in-memory state was actually loaded from: a household
   // code, or null for solo. `undefined` means nothing has loaded yet. Writes
@@ -443,12 +449,13 @@ export default function Simmer() {
   // alternative (falling back to empty) is what used to overwrite real data.
   const loadNamespace = useCallback(async (code) => {
     const k = nsKeys(code);
-    const [p, m, s, sh, sc] = await Promise.all([
+    const [p, m, s, sh, sc, ck] = await Promise.all([
       loadKey(k.pantry, []),
       loadKey(k.matches, []),
       loadKey(k.staples, STAPLES_LIST),
       loadKey(k.shopping, []),
       loadKey(k.stock, {}),
+      loadKey(k.cooked, []),
     ]);
     // Staples migration. Older builds stored a bare array; current builds
     // store {v, items}. Two cases are handled differently on purpose:
@@ -469,6 +476,7 @@ export default function Simmer() {
     const migrated = sItems;
     if (sVer < 27 || Array.isArray(s)) saveKey(k.staples, { v: 27, items: migrated }).catch(() => {});
     setPantry(p); setMatches(m); setStaples(migrated); setShopping(sh); setStockCounts(sc || {});
+    setCooked(Array.isArray(ck) ? ck : []);
     // Only now does state genuinely represent this namespace, so only now is
     // it safe to write back to it. On a throw above we never reach this line.
     loadedCodeRef.current = code ?? null;
@@ -565,6 +573,7 @@ export default function Simmer() {
   const persistMatches = useCallback((next) => persistNs("matches", next, setMatches), [persistNs]);
   const persistStaples = useCallback((next) => persistNs("staples", next, setStaples, { v: 27, items: next }), [persistNs]);
   const persistShopping = useCallback((next) => persistNs("shopping", next, setShopping), [persistNs]);
+  const persistCooked = useCallback((next) => persistNs("cooked", next, setCooked), [persistNs]);
 
   const stockRef = useRef(stockCounts); stockRef.current = stockCounts;
   // learn what the household actually stocks: bump on pantry adds and shopping-list buys
@@ -624,6 +633,7 @@ export default function Simmer() {
         saveKey(k.matches, matchesRef.current || []),
         saveKey(k.staples, { v: 27, items: staplesRef.current || STAPLES_LIST }),
         saveKey(k.shopping, shoppingRef.current || []),
+        saveKey(k.cooked, cookedRef.current || []),
       ]);
       await saveKey(`hh:${code}:meta`, { createdAt: Date.now() });
       // The writes above seeded this household *from* current state, so state
@@ -786,7 +796,7 @@ export default function Simmer() {
     let timer = null;
     const unsubscribe = subscribeKeys(
       `hh:${code}`,
-      [k.pantry, k.matches, k.staples, k.shopping, k.stock],
+      [k.pantry, k.matches, k.staples, k.shopping, k.stock, k.cooked],
       () => {
         clearTimeout(timer);
         timer = setTimeout(() => {
@@ -805,7 +815,7 @@ export default function Simmer() {
 
   if (profile === null || pantry === null || matches === null || staples === null) {
     return (
-      <Shell tab={tab} setTab={setTab} matchCount={0} hhCode={null} onHousehold={() => {}} onAddRecipe={() => {}} onFavorites={() => {}} favCount={0}>
+      <Shell tab={tab} setTab={setTab} matchCount={0} hhCode={null} onHousehold={() => {}} onAddRecipe={() => {}} onFavorites={() => {}} favCount={0} onCooked={() => {}} cookedCount={0}>
         <style>{FONTS}</style>
         <Center><p style={{ color: C.faint, animation: "pulse 1.4s infinite" }}>Warming up…</p></Center>
       </Shell>
@@ -813,13 +823,31 @@ export default function Simmer() {
   }
 
   return (
-    <Shell tab={tab} setTab={setTab} matchCount={matches.length} hhCode={profile.code} onHousehold={() => setHhOpen(true)} onAddRecipe={() => setRecipeSheet(true)} onFavorites={() => setFavSheet(true)} favCount={(matches || []).filter((m) => m.fav).length}>
+    <Shell tab={tab} setTab={setTab} matchCount={matches.length} hhCode={profile.code} onHousehold={() => setHhOpen(true)} onAddRecipe={() => setRecipeSheet(true)} onFavorites={() => setFavSheet(true)} favCount={(matches || []).filter((m) => m.fav).length} onCooked={() => setCookedSheet(true)} cookedCount={(cooked || []).length}>
       <style>{FONTS}</style>
+      {cookedSheet && (
+        <CookedSheet
+          cooked={cooked}
+          onClose={() => setCookedSheet(false)}
+          onCookAgain={(entry) => {
+            // The recipe may have been cleared from matches; re-save it so it
+            // can be opened, scaled and cooked again like any other match.
+            const savedAt = Date.now();
+            persistMatches([{ ...entry, savedAt, uses: [], missing: [] }, ...(matches || [])]);
+            setOpenTarget(savedAt); setTab("matches"); setCookedSheet(false);
+          }}
+        />
+      )}
       {favSheet && (
         <FavSheet
           matches={matches || []}
           onClose={() => setFavSheet(false)}
-          onOpen={(savedAt) => { setOpenTarget(savedAt); setTab("matches"); }}
+          onOpen={(savedAt) => {
+            // Opening a favourite that "clear" hid returns it to the list —
+            // that is what "hidden until I view faves" resolves to.
+            persistMatches((matches || []).map((m) => (m.savedAt === savedAt ? { ...m, listHidden: false } : m)));
+            setOpenTarget(savedAt); setTab("matches");
+          }}
         />
       )}
       {recipeSheet && (
@@ -870,6 +898,7 @@ export default function Simmer() {
           persistPantry={persistPantry} staples={staples}
           shopping={shopping} persistShopping={persistShopping}
           openTarget={openTarget} clearOpenTarget={() => setOpenTarget(null)}
+          cooked={cooked} persistCooked={persistCooked}
         />
       )}
     </Shell>
@@ -878,7 +907,7 @@ export default function Simmer() {
 
 /* ----------------------------- Shell ------------------------------ */
 
-function Shell({ tab, setTab, matchCount, hhCode, onHousehold, onAddRecipe, onFavorites, favCount, children }) {
+function Shell({ tab, setTab, matchCount, hhCode, onHousehold, onAddRecipe, onFavorites, favCount, onCooked, cookedCount, children }) {
   const tabs = [
     { id: "pantry", label: "Pantry", emoji: "🧺" },
     { id: "swipe", label: "Swipe", emoji: "🔥" },
@@ -916,6 +945,12 @@ function Shell({ tab, setTab, matchCount, hhCode, onHousehold, onAddRecipe, onFa
           padding: "6px 11px", fontFamily: "inherit", fontWeight: 800, fontSize: 13,
           cursor: "pointer", color: favCount ? "#FF4466" : C.faint,
         }}>♥{favCount ? ` ${favCount}` : ""}</button>
+        <button onClick={onCooked} aria-label="Cooked" style={{
+          border: `1.5px solid ${cookedCount ? C.gold : C.line}`,
+          background: cookedCount ? C.goldSoft : "#fff", borderRadius: 99,
+          padding: "6px 11px", fontFamily: "inherit", fontWeight: 800, fontSize: 13,
+          cursor: "pointer", color: cookedCount ? "#9A6700" : C.faint,
+        }}>🍳{cookedCount ? ` ${cookedCount}` : ""}</button>
       </header>
       <main style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative" }}>
         {children}
@@ -1253,6 +1288,55 @@ function RecipeSheet({ community, onSave, onDelete, onClose }) {
   );
 }
 
+
+// Recipes actually cooked, newest first. Deliberately separate from matches:
+// clearing matches must not erase what you've cooked, so this holds its own
+// snapshot and survives independently.
+function CookedSheet({ cooked, onClose, onCookAgain }) {
+  const when = (ts) => {
+    const days = Math.floor((Date.now() - ts) / 86400000);
+    if (days <= 0) return "today";
+    if (days === 1) return "yesterday";
+    if (days < 7) return `${days} days ago`;
+    if (days < 30) return `${Math.floor(days / 7)} wk ago`;
+    return `${Math.floor(days / 30)} mo ago`;
+  };
+  return (
+    <div style={{ position: "absolute", inset: 0, background: "rgba(30,43,32,.35)", zIndex: 80, display: "flex", alignItems: "flex-end" }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        background: C.bg, borderRadius: "22px 22px 0 0", width: "100%", maxHeight: "80%",
+        overflowY: "auto", padding: "18px 20px 26px",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", marginBottom: 14 }}>
+          <span style={{ fontFamily: "'Fraunces', serif", fontWeight: 800, fontSize: 20, flex: 1, color: "#9A6700" }}>🍳 Cooked</span>
+          <button onClick={onClose} style={{ border: "none", background: "#F3F1E8", borderRadius: "50%", width: 30, height: 30, cursor: "pointer", color: C.faint }}>✕</button>
+        </div>
+        {cooked.length === 0 ? (
+          <p style={{ color: C.faint, fontSize: 14, textAlign: "center", padding: "20px 0" }}>
+            Nothing cooked yet. Tap “✓ Cooked it” on a saved recipe and it lands here — even if you clear your matches.
+          </p>
+        ) : (
+          cooked.map((c) => (
+            <button key={c.repoId || c.name} onClick={() => onCookAgain(c)} style={{
+              display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left",
+              background: "#fff", border: `1.5px solid ${C.line}`, borderRadius: 12,
+              padding: "10px 12px", marginBottom: 6, cursor: "pointer", fontFamily: "inherit",
+            }}>
+              <span style={{ fontSize: 22 }}>{c.emoji}</span>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 700, fontSize: 14 }}>{c.name}</div>
+                <div style={{ fontSize: 12, color: C.faint, textTransform: "capitalize" }}>
+                  {c.cuisine} · {when(c.lastCookedAt)}{c.times > 1 ? ` · cooked ${c.times}×` : ""}
+                </div>
+              </div>
+              <span style={{ color: "#9A6700", fontSize: 12, fontWeight: 800 }}>Cook again →</span>
+            </button>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
 
 function FavSheet({ matches, onClose, onOpen }) {
   const favs = matches.filter((m) => m.fav);
@@ -2251,7 +2335,7 @@ function scaledIng(m, serves) {
   });
 }
 
-function MatchesTab({ matches, persist, pantry, persistPantry, staples, shopping, persistShopping, openTarget, clearOpenTarget, bumpStock }) {
+function MatchesTab({ matches, persist, pantry, persistPantry, staples, shopping, persistShopping, openTarget, clearOpenTarget, bumpStock, cooked, persistCooked }) {
   const { toast, setToast, showToast } = useToast();
   const [openId, setOpenId] = useState(null);
   const [spinning, setSpinning] = useState(false);
@@ -2274,26 +2358,53 @@ function MatchesTab({ matches, persist, pantry, persistPantry, staples, shopping
     if (openId === m.savedAt) setOpenId(null);
   };
 
-  // "Cooked it": the recipe's pantry ingredients are now used up, so mark them
-  // out of stock. They stay in the pantry list (greyed out) so they're one tap
-  // to restock, and matching skips them until then.
+  // "Cooked it" does two things: marks the recipe's pantry ingredients out of
+  // stock (they stay in the pantry list, greyed out, one tap from restocking,
+  // and matching skips them until then), and records the cook in the log.
+  //
+  // The log is deduped by recipe rather than append-per-cook, so it stays
+  // bounded by distinct recipes and can show a count. It keeps a full snapshot
+  // so a cooked recipe is still viewable after matches are cleared.
   const markUsed = (m) => {
     const used = m.uses || [];
-    persistPantry(pantry.map((p) => (used.some((u) => ingMatch(p.name, u)) ? { ...p, out: true } : p)));
     const n = pantry.filter((p) => !p.out && used.some((u) => ingMatch(p.name, u))).length;
-    if (n) showToast(`${n} ingredient${n > 1 ? "s" : ""} marked used up`);
+    persistPantry(pantry.map((p) => (used.some((u) => ingMatch(p.name, u)) ? { ...p, out: true } : p)));
+
+    const id = m.repoId || m.name;
+    const prev = (cooked || []).find((c) => (c.repoId || c.name) === id);
+    const { uses, missing, rescues, swaps, savedAt, fav, listHidden, ...recipe } = m;
+    const entry = { ...recipe, times: (prev?.times || 0) + 1, lastCookedAt: Date.now() };
+    persistCooked([entry, ...(cooked || []).filter((c) => (c.repoId || c.name) !== id)]);
+
+    showToast(n ? `Cooked · ${n} ingredient${n > 1 ? "s" : ""} used up` : "Added to your cooked list");
+  };
+
+  // Clearing empties the Matches tab. Favourites are kept but hidden from the
+  // list — they stay reachable through the ♥ sheet, which is what "hide favs
+  // until I view faves" means. Everything else is dropped outright.
+  const clearMatches = () => {
+    const favs = matches.filter((m) => m.fav);
+    const dropped = matches.length - favs.length;
+    if (!window.confirm(
+      favs.length
+        ? `Clear ${dropped} saved recipe${dropped === 1 ? "" : "s"}? Your ${favs.length} favourite${favs.length === 1 ? "" : "s"} stay saved under ♥.`
+        : `Clear all ${dropped} saved recipe${dropped === 1 ? "" : "s"}? This can't be undone.`,
+    )) return;
+    persist(favs.map((m) => ({ ...m, listHidden: true })));
+    setOpenId(null);
+    showToast(favs.length ? `Cleared · ${favs.length} favourite${favs.length === 1 ? "" : "s"} kept under ♥` : "Matches cleared");
   };
 
   const pickDinner = () => {
-    if (matches.length < 2 || spinning) return;
+    if (visible.length < 2 || spinning) return;
     setSpinning(true);
     let ticks = 0;
     const iv = setInterval(() => {
-      setHighlightId(matches[Math.floor(Math.random() * matches.length)].savedAt);
+      setHighlightId(visible[Math.floor(Math.random() * visible.length)].savedAt);
       ticks++;
       if (ticks > 9) {
         clearInterval(iv);
-        const chosen = matches[Math.floor(Math.random() * matches.length)];
+        const chosen = visible[Math.floor(Math.random() * visible.length)];
         setHighlightId(chosen.savedAt);
         setSpinning(false);
         openMatch(chosen);
@@ -2301,6 +2412,10 @@ function MatchesTab({ matches, persist, pantry, persistPantry, staples, shopping
       }
     }, 120);
   };
+
+  // Matches hidden by "clear" stay in storage (they are favourites) but are
+  // out of the list until reopened from the ♥ sheet, which un-hides them.
+  const visible = matches.filter((m) => !m.listHidden);
 
   const stockedNames = pantry.filter((p) => !p.out).map((p) => p.name);
 
@@ -2320,13 +2435,14 @@ function MatchesTab({ matches, persist, pantry, persistPantry, staples, shopping
     bumpStock([g.ing]);
   };
 
-  if (matches.length === 0) {
+  if (visible.length === 0) {
     return (
       <Center>
         <div style={{ fontSize: 44, marginBottom: 10 }}>💚</div>
         <p style={{ fontFamily: "'Fraunces', serif", fontWeight: 800, fontSize: 20, marginBottom: 6 }}>No matches yet</p>
         <p style={{ color: C.faint, fontSize: 14, maxWidth: 250 }}>
           Swipe right on recipes you like.
+          {matches.some((m) => m.fav) && " Your favourites are still saved under ♥."}
         </p>
       </Center>
     );
@@ -2336,7 +2452,18 @@ function MatchesTab({ matches, persist, pantry, persistPantry, staples, shopping
     <div style={{ flex: 1, overflowY: "auto", padding: "8px 20px 24px", position: "relative" }}>
       <Toast toast={toast} setToast={setToast} />
 
-      {matches.length >= 2 && (
+      <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
+        <span style={{ fontSize: 12, color: C.faint, fontWeight: 700 }}>
+          {visible.length} saved
+        </span>
+        <button onClick={clearMatches} style={{
+          marginLeft: "auto", border: `1.5px solid ${C.line}`, background: "#fff",
+          color: C.faint, borderRadius: 99, padding: "5px 12px",
+          fontFamily: "inherit", fontWeight: 700, fontSize: 12, cursor: "pointer",
+        }}>Clear matches</button>
+      </div>
+
+      {visible.length >= 2 && (
         <button onClick={pickDinner} disabled={spinning} style={{
           width: "100%", padding: "12px 0", borderRadius: 14, border: "none",
           background: `linear-gradient(135deg, ${C.purple}, ${C.pink})`,
@@ -2346,7 +2473,7 @@ function MatchesTab({ matches, persist, pantry, persistPantry, staples, shopping
         }}>{spinning ? "Picking…" : "🎲 Pick for me"}</button>
       )}
 
-      {matches.map((m) => {
+      {visible.map((m) => {
         const open = openId === m.savedAt;
         const usedInPantry = (m.uses || []).filter((u) =>
           pantry.some((p) => !p.out && ingMatch(p.name, u))
