@@ -1774,29 +1774,31 @@ function SwipeCard({ card, index, onSwipe, topId, isLast, unlock }) {
   const [leaving, setLeaving] = useState(null);
   const start = useRef(null);
   const dirLock = useRef(null);
+  const scrollEl = useRef(null);
   const isTop = card.id === topId;
 
   const onDown = (e) => {
     if (!isTop) return;
-    start.current = { x: e.clientX, y: e.clientY, t: Date.now() };
+    e.preventDefault();
+    start.current = { x: e.clientX, y: e.clientY, t: Date.now(), scrollStart: scrollEl.current?.scrollTop || 0 };
     dirLock.current = null;
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
   };
   const onMove = (e) => {
     if (!start.current) return;
+    e.preventDefault();
     const dx = e.clientX - start.current.x;
     const dy = e.clientY - start.current.y;
     if (!dirLock.current && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
       dirLock.current = Math.abs(dx) > Math.abs(dy) ? "h" : "v";
-      if (dirLock.current === "h") {
-        try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
-      }
     }
     if (dirLock.current === "h") {
-      e.preventDefault();
       setDrag({ x: dx, y: dy, active: true });
+    } else if (dirLock.current === "v" && scrollEl.current) {
+      scrollEl.current.scrollTop = start.current.scrollStart - dy;
     }
   };
-  const onUp = (e) => {
+  const onUp = () => {
     if (!start.current) return;
     const x = drag.x;
     start.current = null;
@@ -1808,7 +1810,6 @@ function SwipeCard({ card, index, onSwipe, topId, isLast, unlock }) {
       setDrag({ x: 0, y: 0, active: false });
     }
     dirLock.current = null;
-    try { e.currentTarget.releasePointerCapture(e.pointerId); } catch {}
   };
 
   const x = leaving ? (leaving === "right" ? 500 : -500) : drag.x;
@@ -1823,7 +1824,7 @@ function SwipeCard({ card, index, onSwipe, topId, isLast, unlock }) {
       onPointerUp={onUp}
       onPointerCancel={onUp}
       style={{
-        position: "absolute", inset: 0, touchAction: "pan-y",
+        position: "absolute", inset: 0, touchAction: "none",
         transform: `translate(${x}px, ${drag.y * 0.15}px) rotate(${rot}deg) scale(${1 - index * 0.035}) translateY(${index * 10}px)`,
         transition: drag.active && !leaving ? "none" : "transform .25s ease, opacity .2s ease",
         opacity: leaving ? 0 : 1,
@@ -1864,7 +1865,7 @@ function SwipeCard({ card, index, onSwipe, topId, isLast, unlock }) {
                 {card.custom && <span style={pill(C.gold, "#fff")}>🏠 custom</span>}
               </div>
             </div>
-            <div style={{ padding: "10px 16px 14px", flex: 1, display: "flex", flexDirection: "column", gap: 6, overflowY: "auto", WebkitOverflowScrolling: "touch" }}>
+            <div ref={scrollEl} style={{ padding: "10px 16px 14px", flex: 1, display: "flex", flexDirection: "column", gap: 6, overflowY: "auto", WebkitOverflowScrolling: "touch" }}>
               <p style={{ margin: 0, color: C.faint, fontSize: 13.5, lineHeight: 1.4, flexShrink: 0 }}>{card.desc}</p>
               {card.rescues?.length > 0 && (
                 <div style={{ background: C.goldSoft, borderRadius: 10, padding: "6px 10px", fontSize: 12, fontWeight: 700, color: "#9A6700", flexShrink: 0 }}>
