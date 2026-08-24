@@ -1425,9 +1425,28 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
   };
 
   const toggleSoon = (id) => persist(pantryRef.current.map((p) => (p.id === id ? { ...p, useSoon: !p.useSoon } : p)));
+
+  // Staples are the "assume I always have this" list, so promoting an item
+  // moves it rather than copying it — a name in both would be matched twice
+  // and shown in neither place consistently.
+  const makeStaple = (item) => {
+    if (staples.some((x) => norm(x) === norm(item.name))) {
+      showToast(`${item.name} is already a staple`);
+      return;
+    }
+    persistStaples([...staples, item.name]);
+    persist(pantryRef.current.filter((x) => x.id !== item.id));
+    showToast(`${item.name} → staples 🧂`);
+  };
   const removeItem = (id) => persist(pantryRef.current.filter((p) => p.id !== id));
 
   const inPantry = (n) => pantry.some((p) => p.name.toLowerCase() === n.toLowerCase());
+  // Quick add is strictly a shortcut for things you don't have yet. Once an
+  // item is in the pantry it lives in the main list and only there, so it
+  // can't be in two places showing two different states.
+  // NB: `hidden` is also what filters the main list, so this stays separate —
+  // folding inPantry into it would empty the pantry list entirely.
+  const inQuickAdd = (n) => !hidden(n) && !inPantry(n);
   const q = search.trim().toLowerCase();
   const grouped = CATEGORIES.map((c) => ({
     ...c, items: pantry.filter((p) =>
@@ -1527,38 +1546,24 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
                 return QUICK_ADD.map((g) => ({ ...g, items: [...(extras[g.cat] || []), ...g.items] }));
               })().map((g) => {
                 const meta = CATEGORIES.find((c) => c.id === g.cat);
-                if (g.items.every((n) => hidden(n))) return null;
+                if (!g.items.some((n) => inQuickAdd(n))) return null;
                 return (
                   <div key={g.cat} style={{ marginBottom: 8 }}>
                     <div style={{ fontSize: 11, fontWeight: 700, color: C.faint, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 4 }}>
                       {meta.emoji} {meta.label}
                     </div>
                     <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
-                      {g.items.filter((n) => !hidden(n)).map((n) => {
-                        const existing = pantry.find((p) => p.name.toLowerCase() === n.toLowerCase());
-                        return (
-                          <SmartChip
-                            key={n}
-                            p={existing || { name: n, out: true, useSoon: false }}
-                            isNew={!existing}
-                            onTap={() => {
-                              if (!existing) return addNames([n]);
-                              // Deselecting here removes the item rather than
-                              // leaving an out-of-stock entry behind in the
-                              // pantry list. The pantry list's own chips still
-                              // toggle in/out — that's where "I'm out of this,
-                              // keep it on the list" belongs.
-                              if (!existing.out) {
-                                removeItem(existing.id);
-                                showToast(`${existing.name} removed`);
-                                return;
-                              }
-                              return toggleOut(existing.id); // was out → restock
-                            }}
-                            onSwipeRight={() => addToShopping(n)}
-                          />
-                        );
-                      })}
+                      {g.items.filter(inQuickAdd).map((n) => (
+                        // Always "new" here — anything already in the pantry is
+                        // filtered out above, so tapping only ever adds.
+                        <SmartChip
+                          key={n}
+                          p={{ name: n, out: true, useSoon: false }}
+                          isNew
+                          onTap={() => addNames([n])}
+                          onSwipeRight={() => addToShopping(n)}
+                        />
+                      ))}
                     </div>
                   </div>
                 );
@@ -1590,8 +1595,8 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
           )}
 
           {pantry.length > 0 && (
-            <p style={{ fontSize: 11.5, color: C.faint, margin: "0 0 10px" }}>
-              Tap to mark used · long-press to delete
+            <p style={{ fontSize: 11.5, color: C.faint, margin: "0 0 10px", lineHeight: 1.5 }}>
+              Tap to select or deselect · swipe right → shopping list · long-press → staples
             </p>
           )}
 
@@ -1607,6 +1612,7 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
                     p={p}
                     onTap={() => toggleOut(p.id)}
                     onSwipeRight={() => addToShopping(p.name)}
+                    onLongPress={() => makeStaple(p)}
                     onDelete={() => removeItem(p.id)}
                   />
                 ))}
@@ -1674,12 +1680,20 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
   );
 }
 
-function SmartChip({ p, isNew, onTap, onSwipeRight, onDelete }) {
+function SmartChip({ p, isNew, onTap, onSwipeRight, onLongPress, onDelete }) {
   const [dx, setDx] = useState(0);
   const startX = useRef(null);
   const movedRef = useRef(false);
   const handledRef = useRef(0);
+  const longTimer = useRef(null);
+  const longFired = useRef(false);
   const THRESHOLD = 52;
+  const LONG_PRESS_MS = 500;
+
+  // A long press must not also register as a tap when the finger lifts, so it
+  // sets longFired and every release path checks it.
+  const cancelLongPress = () => clearTimeout(longTimer.current);
+  useEffect(() => () => clearTimeout(longTimer.current), []);
 
   const finish = (d) => {
     handledRef.current = Date.now();
@@ -1692,19 +1706,35 @@ function SmartChip({ p, isNew, onTap, onSwipeRight, onDelete }) {
   const down = (e) => {
     startX.current = e.clientX;
     movedRef.current = false;
+    longFired.current = false;
+    if (onLongPress) {
+      cancelLongPress();
+      longTimer.current = setTimeout(() => {
+        if (movedRef.current || startX.current === null) return; // became a swipe
+        longFired.current = true;
+        handledRef.current = Date.now(); // suppress the click that follows
+        setDx(0);
+        onLongPress();
+      }, LONG_PRESS_MS);
+    }
     try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
   };
   const move = (e) => {
     if (startX.current === null) return;
     const d = e.clientX - startX.current;
-    if (Math.abs(d) > 8) movedRef.current = true;
+    if (Math.abs(d) > 8) { movedRef.current = true; cancelLongPress(); }
+    if (longFired.current) return;
     setDx(Math.max(0, Math.min(d, 84)));
   };
-  const up = () => { if (startX.current !== null) finish(dx); };
-  const cancel = () => { startX.current = null; setDx(0); };
+  const up = () => {
+    cancelLongPress();
+    if (longFired.current) { startX.current = null; setDx(0); return; }
+    if (startX.current !== null) finish(dx);
+  };
+  const cancel = () => { cancelLongPress(); startX.current = null; setDx(0); };
   const click = () => {
     // fallback for webviews that never fire pointerup
-    if (Date.now() - handledRef.current < 500) return;
+    if (longFired.current || Date.now() - handledRef.current < 500) return;
     setDx(0); startX.current = null;
     onTap();
   };
@@ -1732,16 +1762,21 @@ function SmartChip({ p, isNew, onTap, onSwipeRight, onDelete }) {
         onContextMenu={(e) => e.preventDefault()}
         style={{
           padding: "6px 12px", borderRadius: 99, fontSize: 13.5, fontFamily: "inherit",
-          fontWeight: on ? 700 : 500, cursor: "pointer", position: "relative", zIndex: 1,
+          fontWeight: on ? 600 : 500, cursor: "pointer", position: "relative", zIndex: 1,
           userSelect: "none", WebkitUserSelect: "none", WebkitTouchCallout: "none",
           touchAction: "pan-y",
           transform: `translateX(${dx}px)`,
           transition: startX.current === null ? "transform .18s ease, background .12s ease, border-color .12s ease" : "none",
-          border: armed ? `1.5px solid ${C.pink}` : on ? `1.5px solid ${p.useSoon ? C.gold : C.green}` : `1.5px solid ${C.line}`,
-          background: armed ? "#FFF0F3" : on ? (p.useSoon ? C.goldSoft : C.greenSoft) : "#fff",
-          color: armed ? C.pink : on ? (p.useSoon ? "#9A6700" : "#0B7A46") : C.ink,
+          // Being in the pantry is the normal case, so it reads plain — no
+          // tick, no green. Deselected items are the exception and are muted
+          // instead, which keeps the two states apart without colouring in
+          // every chip. "Use soon" keeps its accent; it's a real signal.
+          border: armed ? `1.5px solid ${C.pink}` : on && p.useSoon ? `1.5px solid ${C.gold}` : `1.5px solid ${C.line}`,
+          background: armed ? "#FFF0F3" : on ? (p.useSoon ? C.goldSoft : "#fff") : "#F3F1E8",
+          color: armed ? C.pink : on ? (p.useSoon ? "#9A6700" : C.ink) : C.faint,
+          textDecoration: !isNew && !on ? "line-through" : "none",
         }}>
-        {isNew ? "+ " : on ? (p.useSoon ? "⏰ " : "✓ ") : ""}{p.name}
+        {isNew ? "+ " : on && p.useSoon ? "⏰ " : ""}{p.name}
         {p.sorting && <span style={{ fontSize: 10, marginLeft: 4, animation: "pulse 1.2s infinite" }}>…</span>}
       </button>
       {onDelete && !isNew && p.out && (
