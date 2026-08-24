@@ -16,3 +16,13 @@ alter table kv enable row level security;
 create policy "anon can read"   on kv for select using (true);
 create policy "anon can insert" on kv for insert with check (true);
 create policy "anon can update" on kv for update using (true);
+
+-- Realtime: push household changes to other devices instead of polling.
+-- The client subscribes to postgres_changes on the five hh:CODE:* keys.
+alter publication supabase_realtime add table public.kv;
+
+-- Filters on UPDATE/DELETE match against the replicated row. `k` is the
+-- primary key so it would be replicated either way, but FULL keeps filter
+-- behaviour predictable if a non-key filter is ever added. The table holds a
+-- handful of small rows, so the extra WAL is immaterial.
+alter table public.kv replica identity full;

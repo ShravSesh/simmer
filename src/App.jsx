@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { loadKey, saveKey, keyExists, syncConfigured, configError, SyncError } from "./storage.js";
+import { loadKey, saveKey, keyExists, subscribeKeys, syncConfigured, configError, SyncError } from "./storage.js";
 import { RECIPES as REPO_RAW } from "./data/index.js";
 
 const COMMUNITY_KEY = "simmer-community-recipes";
@@ -694,10 +694,13 @@ export default function Simmer() {
     });
   }, [persistMatches]);
 
-  // Keep household data fresh across devices: refetch on focus and every 20s.
-  // This is last-write-wins with no merge — a value edited on two devices
-  // inside one interval keeps whichever wrote last. Fine for a shared pantry;
-  // it would not be for anything where a lost edit matters.
+  // Keep household data fresh across devices. Realtime (below) is the primary
+  // path; this poll is the fallback for a dropped socket or a missed event, so
+  // sync degrades to the old 20s behaviour rather than stopping.
+  //
+  // Still last-write-wins with no merge — a value edited on two devices at
+  // once keeps whichever wrote last. Fine for a shared pantry; it would not be
+  // for anything where a lost edit matters.
   useEffect(() => {
     const code = profile?.code;
     if (!code) return;
@@ -712,6 +715,35 @@ export default function Simmer() {
     const onVis = () => { if (document.visibilityState === "visible") refresh(); };
     document.addEventListener("visibilitychange", onVis);
     return () => { clearInterval(iv); document.removeEventListener("visibilitychange", onVis); };
+  }, [profile?.code, loadNamespace]);
+
+  // Realtime: the other device's write arrives as a push, so a change shows up
+  // in well under a second instead of waiting out the poll interval.
+  //
+  // On an event we refetch the whole namespace rather than applying the
+  // payload directly. The payload would need the staples migration and the
+  // shape handling in loadNamespace duplicated here to be applied safely, and
+  // one code path for "load the household" is worth the extra round trip.
+  //
+  // Debounced because a single user action can touch several keys at once
+  // (adding to the pantry also bumps stock counts), and createHousehold writes
+  // five — without this that would be five refetches.
+  useEffect(() => {
+    const code = profile?.code;
+    if (!code) return;
+    const k = nsKeys(code);
+    let timer = null;
+    const unsubscribe = subscribeKeys(
+      `hh:${code}`,
+      [k.pantry, k.matches, k.staples, k.shopping, k.stock],
+      () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => {
+          loadNamespace(code).then(() => setSyncError(null), (e) => setSyncError(msg(e)));
+        }, 250);
+      },
+    );
+    return () => { clearTimeout(timer); unsubscribe(); };
   }, [profile?.code, loadNamespace]);
 
   useEffect(() => {

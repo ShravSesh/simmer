@@ -88,6 +88,30 @@ export async function saveKey(key, value) {
   }
 }
 
+// Subscribe to server-side changes on an exact set of keys and call
+// `onChange` when any of them is written by someone else.
+//
+// One binding per key with an `eq` filter, rather than one unfiltered
+// subscription filtered client-side: it keeps other households' traffic off
+// this device, and `eq` is the filter Realtime supports most reliably (there
+// is no prefix/LIKE filter, which is why the keys are enumerated).
+//
+// Returns an unsubscribe function. Safe to call with sync unconfigured — it
+// no-ops, and the caller's polling fallback still runs.
+export function subscribeKeys(channelName, keys, onChange) {
+  if (!supabase || !keys.length) return () => {};
+  const channel = supabase.channel(channelName);
+  for (const k of keys) {
+    channel.on(
+      "postgres_changes",
+      { event: "*", schema: "public", table: "kv", filter: `k=eq.${k}` },
+      (payload) => onChange(payload?.new?.k || k),
+    );
+  }
+  channel.subscribe();
+  return () => { try { supabase.removeChannel(channel); } catch { /* already gone */ } };
+}
+
 export async function keyExists(key) {
   if (isShared(key)) {
     if (!supabase) throw new SyncError(NOT_CONFIGURED);
