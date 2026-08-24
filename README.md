@@ -54,3 +54,4 @@ per-use costs — recipe matching runs entirely on-device. Installable on phones
 - Smart empty state: shows which single ingredient unlocks the most recipes
 - Staples, shopping list, "pick dinner for me", grocery derivation
 - Costs: Supabase + Vercel free tiers. That's it.
+
