@@ -1185,13 +1185,23 @@ function Shell({ tab, setTab, matchCount, hhCode, onHousehold, onAddRecipe, onFa
       height: "100dvh", display: "flex", flexDirection: "column", overflow: "hidden",
     }}>
       <header style={{ padding: "10px 20px 4px", display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{
-          fontFamily: "'Fraunces', serif", fontWeight: 900, fontSize: 26, letterSpacing: "-0.02em",
-          background: `linear-gradient(90deg, ${C.green}, ${C.gold})`,
-          WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent",
-        }}>
+        {/* The wordmark doubles as the way home. It is a button rather than
+            an anchor because this is in-app navigation with no URL behind it,
+            styled to look exactly as it did before. */}
+        <button
+          onClick={() => setTab("swipe")}
+          aria-label="Simmer — back to swiping"
+          style={{
+            border: "none", padding: 0, cursor: "pointer",
+            fontFamily: "'Fraunces', serif", fontWeight: 900, fontSize: 26, letterSpacing: "-0.02em",
+            background: `linear-gradient(90deg, ${C.green}, ${C.gold})`,
+            WebkitBackgroundClip: "text", backgroundClip: "text",
+            WebkitTextFillColor: "transparent", color: "transparent",
+            lineHeight: 1.1,
+          }}
+        >
           Simmer
-        </span>
+        </button>
         <button onClick={onHousehold} style={{
           marginLeft: "auto", border: `1.5px solid ${hhCode ? C.green : C.line}`,
           background: hhCode ? C.greenSoft : "#fff", color: hhCode ? C.green : C.faint,
@@ -1211,11 +1221,14 @@ function Shell({ tab, setTab, matchCount, hhCode, onHousehold, onAddRecipe, onFa
           padding: "6px 11px", fontFamily: "inherit", fontWeight: 800, fontSize: 13,
           cursor: "pointer", color: favCount ? "#FF4466" : C.faint,
         }}>♥</button>
+        {/* Opens a sheet; it is not a toggle and has no selected state. It
+            used to take a gold fill and border whenever anything had been
+            cooked, which read as permanently switched on. Neutral now, matching
+            the ➕ beside it; the count still shows as plain text. */}
         <button onClick={onCooked} aria-label="Cooked" style={{
-          border: `1.5px solid ${cookedCount ? C.gold : C.line}`,
-          background: cookedCount ? C.goldSoft : "#fff", borderRadius: 99,
+          border: `1.5px solid ${C.line}`, background: "#fff", borderRadius: 99,
           padding: "6px 11px", fontFamily: "inherit", fontWeight: 800, fontSize: 13,
-          cursor: "pointer", color: cookedCount ? "#9A6700" : C.faint,
+          cursor: "pointer", color: C.ink,
         }}>🍳{cookedCount ? ` ${cookedCount}` : ""}</button>
       </header>
       <main style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative" }}>
