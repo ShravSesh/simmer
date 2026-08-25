@@ -4,10 +4,18 @@ import { RECIPES as REPO_RAW } from "./data/index.js";
 
 const COMMUNITY_KEY = "simmer-community-recipes";
 
+// A dish usually belongs to more than one meal — a grain bowl is lunch and
+// dinner, a salad is both and sometimes neither. `meal` stays the primary,
+// used for display and by the recipe editor; `meals` is the full set a recipe
+// can be filtered into. Recipes without a `meals` array fall back to their
+// single `meal`, so nothing has to be rewritten to keep working.
+const mealsOf = (card) => (card?.mealTypes?.length ? card.mealTypes : [card?.mealType].filter(Boolean));
+const servesMeal = (card, meal) => !meal || mealsOf(card).includes(meal);
+
 // Adapt repo entries to the app's card shape once at load.
 const REPO = REPO_RAW.map((r) => ({
   repoId: r.id, name: r.name, cuisine: r.cuisine, emoji: r.emoji,
-  minutes: r.mins, mealType: r.meal, desc: r.desc, tags: r.tags || [],
+  minutes: r.mins, mealType: r.meal, mealTypes: r.meals || [r.meal], desc: r.desc, tags: r.tags || [],
   ingredients: r.core, serves: r.serves, ingFull: r.ing,
   steps: r.steps, macros: r.mac, alts: r.alts || {},
 }));
@@ -452,16 +460,49 @@ function pickFromRepo(recipes, { pantry, staples, mode, exclude, swipes, cuisine
   // Time-of-day meal preference (device local time, soft boost)
   const hr = new Date().getHours();
   const timeMeals = hr < 10 ? ["breakfast"] : hr < 14 ? ["lunch", "salad"] : hr < 18 ? ["snack", "dessert"] : ["dinner"];
-  const candidates = recipes
+  const eligible = recipes
     .filter((r) => !exclude.has(r.name.toLowerCase()))
     .filter((r) => !wanted.size || wanted.has((r.cuisine || "").toLowerCase()))
     .filter((r) => !maxTime || (r.minutes || 0) <= maxTime)
-    .filter((r) => !mealType || r.mealType === mealType)
+    .filter((r) => servesMeal(r, mealType))
     .map((r) => {
       const fit = computeFit(r, pantry, staples);
       return { r, fit };
     })
-    .filter(({ fit }) => (mode === "strict" ? fit.missing.length === 0 : fit.missing.length <= 2))
+    .filter(({ fit }) => (mode === "strict" ? fit.missing.length === 0 : fit.missing.length <= 2));
+
+  // Supply normalisation.
+  //
+  // The repository is lopsided in ways that are honest — Indian cuisine has a
+  // far bigger breakfast repertoire than Italian does — but a deck that simply
+  // samples the pool inherits that lopsidedness whole. So each region is
+  // penalised in proportion to how over-represented it is IN THIS POOL, which
+  // is filter-aware for free: filter to breakfast and it corrects breakfast's
+  // skew, filter to one cuisine and there is only one region so it does
+  // nothing.
+  //
+  // Logarithmic rather than linear so a region at twice its fair share is
+  // nudged while one at ten times is pushed hard, and clamped so this can
+  // never outrank the missing-ingredient tiers — the deck's first job is still
+  // telling you what you can actually cook tonight.
+  const SUPPLY_K = 22;
+  const SUPPLY_CLAMP = 40;
+  const poolByRegion = {};
+  for (const c of eligible) {
+    const rg = regionOf((c.r.cuisine || "").toLowerCase());
+    poolByRegion[rg] = (poolByRegion[rg] || 0) + 1;
+  }
+  const regionsPresent = Object.keys(poolByRegion).length;
+  const fairShare = 1 / Math.max(1, regionsPresent);
+  const supplyPenalty = (rg) => {
+    if (regionsPresent < 2 || !eligible.length) return 0;
+    const share = (poolByRegion[rg] || 0) / eligible.length;
+    if (share <= 0) return 0;
+    const p = SUPPLY_K * Math.log(share / fairShare);
+    return Math.max(-SUPPLY_CLAMP, Math.min(SUPPLY_CLAMP, p));
+  };
+
+  const candidates = eligible
     .map((c) => {
       const cz = (c.r.cuisine || "").toLowerCase();
       // Tier by missing count (0 = best, then 1, then 2) — shuffled within each tier
@@ -474,10 +515,13 @@ function pickFromRepo(recipes, { pantry, staples, mode, exclude, swipes, cuisine
       if (passed.has(cz) && !liked.has(cz)) tier += 10;
       // Explore/exploit steering (0 when neither is active)
       tier += steer[cz] || 0;
+      // Supply normalisation: over-represented regions get pushed down,
+      // under-represented ones pulled up.
+      tier += supplyPenalty(regionOf(cz));
       // Rescue bonus for use-soon items
       if (c.fit.rescues.length) tier -= 5;
       // Time-of-day: boost matching meal type when no manual meal filter is set
-      if (!mealType && timeMeals.includes(c.r.mealType)) tier -= 15;
+      if (!mealType && mealsOf(c.r).some((m) => timeMeals.includes(m))) tier -= 15;
       // Jitter for variety between shuffles. Note the range (0–50) is wider
       // than the pantry-use step (40), so this can occasionally reorder
       // across one "uses" step — deliberate, it keeps decks from being
@@ -903,7 +947,7 @@ export default function Simmer() {
       const filterPass = allRecipes
         .filter((r) => { const w = cuisinesRef.current.map((c) => c.toLowerCase()); return !w.length || w.includes(r.cuisine); })
         .filter((r) => !maxTimeRef.current || r.minutes <= maxTimeRef.current)
-        .filter((r) => !mealTypeRef.current || r.mealType === mealTypeRef.current);
+        .filter((r) => servesMeal(r, mealTypeRef.current));
       const fits = filterPass.map((r) => computeFit(r, p, s));
       const threshold = mode === "strict" ? 0 : 2;
       const matchable = filterPass.filter((_, i) => fits[i].missing.length <= threshold).length;
@@ -1439,7 +1483,7 @@ function RecipeSheet({ community, onSave, onDelete, onClose }) {
     const entry = {
       repoId: editingId || "cu" + Date.now(),
       name: form.name.trim(), cuisine: form.cuisine.trim().toLowerCase(),
-      emoji: form.emoji.trim() || "🍲", minutes: mins, mealType: form.meal,
+      emoji: form.emoji.trim() || "🍲", minutes: mins, mealType: form.meal, mealTypes: [form.meal],
       desc: form.desc.trim() || "A household original.", tags: ["custom"],
       ingredients: core, serves, ingFull: ing, steps, macros, custom: true,
     };
@@ -2411,7 +2455,7 @@ function SwipeTab({ pantry, deck, exhausted, onResetSeen, allRecipes, staples, p
             const filterPass = allRecipes
               .filter((r) => { const w = cuisines.map((c) => c.toLowerCase()); return !w.length || w.includes(r.cuisine); })
               .filter((r) => !maxTime || r.minutes <= maxTime)
-              .filter((r) => !mealType || r.mealType === mealType);
+              .filter((r) => servesMeal(r, mealType));
             const counts = {};
             for (const r of filterPass) {
               const missing = r.ingredients.filter((ing) => !ingInList(ing, pantry.map((x) => x.name)) && !ingInList(ing, staples));
