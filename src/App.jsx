@@ -16,6 +16,7 @@ const servesMeal = (card, meal) => !meal || mealsOf(card).includes(meal);
 const REPO = REPO_RAW.map((r) => ({
   repoId: r.id, name: r.name, cuisine: r.cuisine, emoji: r.emoji,
   minutes: r.mins, mealType: r.meal, mealTypes: r.meals || [r.meal], desc: r.desc, tags: r.tags || [],
+  kid: !!r.kid,
   ingredients: r.core, serves: r.serves, ingFull: r.ing,
   steps: r.steps, macros: r.mac, alts: r.alts || {},
 }));
