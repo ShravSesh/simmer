@@ -2295,19 +2295,6 @@ function SwipeTab({ pantry, deck, exhausted, onResetSeen, allRecipes, staples, p
           label={maxTime ? `⏱ ≤${maxTime}m` : "⏱ Time"}
           onClick={() => setOpenFilter(openFilter === "time" ? null : "time")}
         />
-        {canUndo && (
-          <button onClick={onUndo} aria-label="Undo last swipe" style={{
-            flexShrink: 0, border: `1.5px solid ${C.purple}`, background: C.purpleSoft,
-            color: C.purple, borderRadius: 99, padding: "5px 12px", fontFamily: "inherit",
-            fontWeight: 800, fontSize: 12, cursor: "pointer",
-          }}>↩️ Undo</button>
-        )}
-        {swipes.length > 0 && (
-          <button onClick={onReset} style={{
-            flexShrink: 0, border: "none", background: "transparent", color: C.faint,
-            fontFamily: "inherit", fontSize: 12, fontWeight: 600, cursor: "pointer", textDecoration: "underline",
-          }}>reset</button>
-        )}
       </div>
 
       {openFilter && (
@@ -2472,6 +2459,33 @@ function SwipeTab({ pantry, deck, exhausted, onResetSeen, allRecipes, staples, p
           )).reverse();
         })()}
       </div>
+
+      {/* Undo and reset-vibe live below the deck rather than in the filter
+          row. That row scrolls horizontally on a narrow screen, so both
+          controls sat off the right edge exactly when they were wanted —
+          mid-swipe. Here they are always on screen and never move.
+          flexShrink:0 keeps the strip from being squeezed by the deck above. */}
+      {(canUndo || swipes.length > 0) && (
+        <div style={{
+          flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
+          gap: 10, padding: "0 20px 10px",
+        }}>
+          {canUndo && (
+            <button onClick={onUndo} aria-label="Undo last swipe" style={{
+              border: `1.5px solid ${C.purple}`, background: C.purpleSoft, color: C.purple,
+              borderRadius: 99, padding: "7px 16px", fontFamily: "inherit",
+              fontWeight: 800, fontSize: 13, cursor: "pointer",
+            }}>↩️ Undo</button>
+          )}
+          {swipes.length > 0 && (
+            <button onClick={onReset} aria-label="Reset the session vibe" style={{
+              border: `1.5px solid ${C.line}`, background: "#fff", color: C.faint,
+              borderRadius: 99, padding: "7px 16px", fontFamily: "inherit",
+              fontWeight: 700, fontSize: 13, cursor: "pointer",
+            }}>🔥 Reset vibe</button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
