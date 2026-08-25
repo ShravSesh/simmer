@@ -1158,6 +1158,11 @@ export default function Simmer() {
           goPantry={() => setTab("pantry")}
         />
       )}
+      {tab === "prep" && (
+        <MealPrepTab
+          pantry={pantry} staples={staples} allRecipes={allRecipes} mode={mode}
+        />
+      )}
       {tab === "matches" && (
         <MatchesTab
           matches={matches} persist={persistMatches} pantry={pantry} bumpStock={bumpStock}
@@ -1178,6 +1183,7 @@ function Shell({ tab, setTab, matchCount, hhCode, onHousehold, onAddRecipe, onFa
     { id: "pantry", label: "Pantry", emoji: "🧺" },
     { id: "swipe", label: "Swipe", emoji: "🔥" },
     { id: "matches", label: "Matches", emoji: "💚" },
+    { id: "prep", label: "Meal prep", emoji: "🗓️" },
   ];
   return (
     <div style={{
@@ -2776,6 +2782,405 @@ function scaledIng(m, serves) {
     const sq = q == null ? null : q * factor;
     return [sq == null ? "" : fmtQty(sq), u || "", name].filter(Boolean).join(" ").trim();
   });
+}
+
+/* ==================================================================
+   Meal prep
+
+   A grid of breakfast / lunch / dinner across 3, 5 or 7 days, filled
+   from the same picker the swipe deck uses so it respects the pantry,
+   the region balancing and the meal tagging.
+
+   Rendered days-down rather than days-across: three meal columns fit a
+   phone, seven day columns do not. Same grid, turned ninety degrees.
+   ================================================================== */
+const PREP_MEALS = ["breakfast", "lunch", "dinner"];
+const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const PREP_SPANS = [3, 5, 7];
+
+function MealPrepTab({ pantry, staples, allRecipes, mode }) {
+  const [span, setSpan] = useState(5);
+  const [startDay, setStartDay] = useState(() => new Date().getDay());
+  const [plan, setPlan] = useState({});
+  const [cellFilters, setCellFilters] = useState({});
+  const [openKey, setOpenKey] = useState(null);
+  const [filterKey, setFilterKey] = useState(null);
+  const { toast, setToast, showToast } = useToast();
+
+  const cellKey = (d, meal) => `${d}:${meal}`;
+  const dayLabel = (d) => DAY_NAMES[(startDay + d) % 7];
+
+  // One pick for one slot. `used` keeps the week from repeating itself.
+  const pickFor = useCallback((meal, used, filter = {}) => {
+    const [hit] = pickFromRepo(allRecipes, {
+      pantry: pantry || [], staples: staples || [], mode,
+      exclude: used, swipes: [],
+      cuisines: filter.cuisines || [],
+      maxTime: filter.maxTime ?? null,
+      mealType: meal, count: 1,
+    });
+    return hit || null;
+  }, [allRecipes, pantry, staples, mode]);
+
+  // Fill every empty slot, leaving anything already there alone.
+  const fillPlan = useCallback((keep = {}, days = span, filters = cellFilters) => {
+    const used = new Set(Object.values(keep).filter(Boolean).map((r) => r.name.toLowerCase()));
+    const next = { ...keep };
+    for (let d = 0; d < days; d++) {
+      for (const meal of PREP_MEALS) {
+        const k = cellKey(d, meal);
+        if (next[k]) continue;
+        const hit = pickFor(meal, used, filters[k]);
+        if (hit) { next[k] = hit; used.add(hit.name.toLowerCase()); }
+      }
+    }
+    return next;
+  }, [span, cellFilters, pickFor]);
+
+  // Build on arrival, and whenever the span grows into empty slots.
+  useEffect(() => {
+    setPlan((prev) => fillPlan(prev));
+  }, [span, fillPlan]);
+
+  const replaceCell = (d, meal) => {
+    const k = cellKey(d, meal);
+    setPlan((prev) => {
+      const used = new Set(Object.entries(prev)
+        .filter(([key, r]) => key !== k && r)
+        .map(([, r]) => r.name.toLowerCase()));
+      const hit = pickFor(meal, used, cellFilters[k]);
+      if (!hit) { showToast("Nothing else matches that slot"); return prev; }
+      return { ...prev, [k]: hit };
+    });
+  };
+
+  const applyCellFilter = (k, filter) => {
+    setCellFilters((f) => ({ ...f, [k]: filter }));
+    const [d, meal] = k.split(":");
+    setPlan((prev) => {
+      const used = new Set(Object.entries(prev)
+        .filter(([key, r]) => key !== k && r)
+        .map(([, r]) => r.name.toLowerCase()));
+      const hit = pickFor(meal, used, filter);
+      if (!hit) { showToast("No recipe fits those filters"); return prev; }
+      return { ...prev, [k]: hit };
+    });
+  };
+
+  const reshuffle = () => setPlan(fillPlan({}));
+
+  const open = openKey ? plan[openKey] : null;
+
+  if (!pantry?.length) {
+    return (
+      <Center>
+        <div style={{ fontSize: 44, marginBottom: 10 }}>🗓️</div>
+        <p style={{ fontFamily: "'Fraunces', serif", fontWeight: 800, fontSize: 20, marginBottom: 6 }}>Add your pantry first</p>
+        <p style={{ color: C.faint, fontSize: 14, maxWidth: 250 }}>
+          Meal prep builds the week from what you have.
+        </p>
+      </Center>
+    );
+  }
+
+  return (
+    <div style={{ flex: 1, overflowY: "auto", padding: "8px 16px 24px", position: "relative" }}>
+      <Toast toast={toast} setToast={setToast} />
+
+      {/* Span, then start day beneath it. */}
+      <div style={{ display: "flex", gap: 6, marginBottom: 8, alignItems: "center" }}>
+        {PREP_SPANS.map((n) => (
+          <button key={n} onClick={() => setSpan(n)} style={{
+            border: `1.5px solid ${span === n ? C.green : C.line}`,
+            background: span === n ? C.greenSoft : "#fff",
+            color: span === n ? C.green : C.faint,
+            borderRadius: 99, padding: "6px 14px", fontFamily: "inherit",
+            fontWeight: 800, fontSize: 13, cursor: "pointer",
+          }}>{n} days</button>
+        ))}
+        <button onClick={reshuffle} style={{
+          marginLeft: "auto", border: `1.5px solid ${C.line}`, background: "#fff",
+          color: C.faint, borderRadius: 99, padding: "6px 12px",
+          fontFamily: "inherit", fontWeight: 700, fontSize: 12, cursor: "pointer",
+        }}>🔄 Reshuffle</button>
+      </div>
+
+      <div style={{ display: "flex", gap: 4, marginBottom: 10, flexWrap: "wrap", alignItems: "center" }}>
+        <span style={{ fontSize: 11, color: C.faint, fontWeight: 700, marginRight: 2 }}>Start</span>
+        {DAY_NAMES.map((d, i) => (
+          <button key={d} onClick={() => setStartDay(i)} style={{
+            border: `1.5px solid ${startDay === i ? C.gold : C.line}`,
+            background: startDay === i ? C.goldSoft : "#fff",
+            color: startDay === i ? "#9A6700" : C.faint,
+            borderRadius: 99, padding: "4px 9px", fontFamily: "inherit",
+            fontWeight: 700, fontSize: 11.5, cursor: "pointer",
+          }}>{d}</button>
+        ))}
+      </div>
+
+      <p style={{ fontSize: 11, color: C.faint, margin: "0 0 8px", lineHeight: 1.5 }}>
+        Tap a meal to open it · swipe to swap it · long-press to filter that slot
+      </p>
+
+      {/* Meal columns; days run down. */}
+      <div style={{
+        display: "grid", gridTemplateColumns: "26px 1fr 1fr 1fr", gap: 5,
+        alignItems: "stretch",
+      }}>
+        <span />
+        {PREP_MEALS.map((m) => (
+          <div key={m} style={{
+            fontSize: 10.5, fontWeight: 800, color: C.faint, textTransform: "uppercase",
+            letterSpacing: "0.05em", textAlign: "center", paddingBottom: 2,
+          }}>{m.slice(0, 5)}</div>
+        ))}
+
+        {Array.from({ length: span }, (_, d) => (
+          <React.Fragment key={d}>
+            <div style={{
+              fontSize: 11, fontWeight: 800, color: C.ink, display: "flex",
+              alignItems: "center", justifyContent: "center",
+            }}>{dayLabel(d)}</div>
+            {PREP_MEALS.map((meal) => {
+              const k = cellKey(d, meal);
+              return (
+                <PlanCell
+                  key={k}
+                  recipe={plan[k]}
+                  filtered={!!(cellFilters[k]?.cuisines?.length || cellFilters[k]?.maxTime)}
+                  onTap={() => plan[k] && setOpenKey(k)}
+                  onSwipe={() => replaceCell(d, meal)}
+                  onLongPress={() => setFilterKey(k)}
+                />
+              );
+            })}
+          </React.Fragment>
+        ))}
+      </div>
+
+      {open && <PrepRecipeSheet recipe={open} onClose={() => setOpenKey(null)} />}
+      {filterKey && (
+        <PrepFilterSheet
+          value={cellFilters[filterKey] || {}}
+          onClose={() => setFilterKey(null)}
+          onApply={(f) => { applyCellFilter(filterKey, f); setFilterKey(null); }}
+        />
+      )}
+    </div>
+  );
+}
+
+// One slot in the grid. Same gesture arbitration as SmartChip — a horizontal
+// drag past the threshold swaps the recipe, a hold opens filters, a clean tap
+// opens the card — but sized as a tile rather than a chip.
+function PlanCell({ recipe, filtered, onTap, onSwipe, onLongPress }) {
+  const [dx, setDx] = useState(0);
+  const startX = useRef(null);
+  const moved = useRef(false);
+  const handled = useRef(0);
+  const longTimer = useRef(null);
+  const longFired = useRef(false);
+  const THRESHOLD = 56;
+
+  const cancelLong = () => clearTimeout(longTimer.current);
+  useEffect(() => () => clearTimeout(longTimer.current), []);
+
+  const down = (e) => {
+    startX.current = e.clientX;
+    moved.current = false;
+    longFired.current = false;
+    cancelLong();
+    longTimer.current = setTimeout(() => {
+      if (moved.current || startX.current === null) return;
+      longFired.current = true;
+      handled.current = Date.now();
+      setDx(0);
+      onLongPress();
+    }, 500);
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch {}
+  };
+  const move = (e) => {
+    if (startX.current === null) return;
+    const d = e.clientX - startX.current;
+    if (Math.abs(d) > 8) { moved.current = true; cancelLong(); }
+    if (longFired.current) return;
+    setDx(Math.max(-90, Math.min(d, 90)));
+  };
+  const up = () => {
+    cancelLong();
+    const d = dx;
+    setDx(0);
+    if (longFired.current) { startX.current = null; return; }
+    if (startX.current === null) return;
+    startX.current = null;
+    handled.current = Date.now();
+    if (Math.abs(d) >= THRESHOLD) onSwipe();
+    else if (!moved.current) onTap();
+  };
+  const cancel = () => { cancelLong(); startX.current = null; setDx(0); };
+  const click = () => {
+    if (longFired.current || Date.now() - handled.current < 500) return;
+    setDx(0); startX.current = null;
+    onTap();
+  };
+
+  const pull = Math.min(Math.abs(dx) / THRESHOLD, 1);
+
+  if (!recipe) {
+    return (
+      <div style={{
+        border: `1.5px dashed ${C.line}`, borderRadius: 12, minHeight: 74,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        color: C.line, fontSize: 18,
+      }}>—</div>
+    );
+  }
+
+  return (
+    <div style={{ position: "relative", overflow: "hidden", borderRadius: 12 }}>
+      {pull > 0.15 && (
+        <div style={{
+          position: "absolute", inset: 0, display: "flex", alignItems: "center",
+          justifyContent: "center", color: C.purple, fontSize: 18, opacity: pull,
+        }}>🔄</div>
+      )}
+      <button
+        type="button"
+        onClick={click}
+        onPointerDown={down}
+        onPointerMove={move}
+        onPointerUp={up}
+        onPointerCancel={cancel}
+        onContextMenu={(e) => e.preventDefault()}
+        style={{
+          width: "100%", minHeight: 74, textAlign: "left", position: "relative",
+          border: `1.5px solid ${filtered ? C.gold : C.line}`,
+          background: "#fff", borderRadius: 12, padding: "8px 9px",
+          fontFamily: "inherit", cursor: "pointer", display: "block",
+          userSelect: "none", WebkitUserSelect: "none", WebkitTouchCallout: "none",
+          touchAction: "pan-y",
+          transform: `translateX(${dx}px)`,
+          transition: startX.current === null ? "transform .18s ease" : "none",
+          opacity: 1 - pull * 0.35,
+        }}
+      >
+        <div style={{ fontSize: 17, lineHeight: 1, marginBottom: 3 }}>{recipe.emoji}</div>
+        <div style={{
+          fontSize: 11.5, fontWeight: 700, color: C.ink, lineHeight: 1.25,
+          display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical",
+          overflow: "hidden",
+        }}>{recipe.name}</div>
+        <div style={{ fontSize: 10, color: C.faint, marginTop: 2 }}>
+          {recipe.minutes}m{recipe.missing?.length ? ` · need ${recipe.missing.length}` : ""}
+        </div>
+      </button>
+    </div>
+  );
+}
+
+// Full card for one planned meal.
+function PrepRecipeSheet({ recipe, onClose }) {
+  const [serves, setServes] = useState(recipe.serves || 2);
+  const ings = scaledIng(recipe, serves);
+  return (
+    <div style={{ position: "absolute", inset: 0, background: "rgba(30,43,32,.35)", zIndex: 80, display: "flex", alignItems: "flex-end" }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        background: C.bg, borderRadius: "22px 22px 0 0", width: "100%", maxHeight: "88%",
+        overflowY: "auto", padding: "18px 20px 26px",
+      }}>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 10 }}>
+          <span style={{ fontSize: 30 }}>{recipe.emoji}</span>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontFamily: "'Fraunces', serif", fontWeight: 800, fontSize: 19, lineHeight: 1.2 }}>{recipe.name}</div>
+            <div style={{ fontSize: 12, color: C.faint, textTransform: "capitalize", marginTop: 2 }}>
+              {recipe.cuisine} · {recipe.minutes} min
+            </div>
+          </div>
+          <button onClick={onClose} style={{ border: "none", background: "#F3F1E8", borderRadius: "50%", width: 30, height: 30, cursor: "pointer", color: C.faint, flexShrink: 0 }}>✕</button>
+        </div>
+
+        <p style={{ fontSize: 13.5, color: C.faint, margin: "0 0 12px", lineHeight: 1.5 }}>{recipe.desc}</p>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+          <span style={{ fontSize: 12, fontWeight: 700, color: C.faint }}>Serves</span>
+          <button onClick={() => setServes((n) => Math.max(1, n - 1))} style={stepBtn}>−</button>
+          <span style={{ fontWeight: 800, fontSize: 14, minWidth: 16, textAlign: "center" }}>{serves}</span>
+          <button onClick={() => setServes((n) => Math.min(8, n + 1))} style={stepBtn}>+</button>
+        </div>
+
+        <div style={{ fontSize: 11.5, fontWeight: 800, color: C.faint, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>Ingredients</div>
+        <ul style={{ margin: "0 0 14px", paddingLeft: 18, fontSize: 13.5, lineHeight: 1.7 }}>
+          {ings.map((line, i) => <li key={i}>{line}</li>)}
+        </ul>
+
+        <div style={{ fontSize: 11.5, fontWeight: 800, color: C.faint, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 6 }}>Method</div>
+        <ol style={{ margin: "0 0 14px", paddingLeft: 18, fontSize: 13.5, lineHeight: 1.65 }}>
+          {(recipe.steps || []).map((s, i) => <li key={i} style={{ marginBottom: 5 }}>{s}</li>)}
+        </ol>
+
+        {recipe.macros && (
+          <div style={{ display: "flex", gap: 8, fontSize: 12, color: C.faint }}>
+            <span><b style={{ color: C.ink }}>{recipe.macros.cal}</b> cal</span>
+            <span><b style={{ color: C.ink }}>{recipe.macros.p}g</b> protein</span>
+            <span><b style={{ color: C.ink }}>{recipe.macros.c}g</b> carbs</span>
+            <span><b style={{ color: C.ink }}>{recipe.macros.f}g</b> fat</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const stepBtn = {
+  border: `1.5px solid ${C.line}`, background: "#fff", color: C.ink,
+  borderRadius: "50%", width: 26, height: 26, fontSize: 15, fontWeight: 800,
+  cursor: "pointer", fontFamily: "inherit", lineHeight: 1,
+};
+
+// Filters for one slot only, so a single dinner can be pinned to a cuisine
+// without disturbing the rest of the week.
+function PrepFilterSheet({ value, onClose, onApply }) {
+  const [cuisines, setCuisines] = useState(value.cuisines || []);
+  const [maxTime, setMaxTime] = useState(value.maxTime ?? null);
+  const toggle = (c) => setCuisines((cur) => cur.includes(c) ? cur.filter((x) => x !== c) : [...cur, c]);
+  return (
+    <div style={{ position: "absolute", inset: 0, background: "rgba(30,43,32,.35)", zIndex: 80, display: "flex", alignItems: "flex-end" }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={{
+        background: C.bg, borderRadius: "22px 22px 0 0", width: "100%", maxHeight: "80%",
+        overflowY: "auto", padding: "18px 20px 26px",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", marginBottom: 12 }}>
+          <span style={{ fontFamily: "'Fraunces', serif", fontWeight: 800, fontSize: 19, flex: 1 }}>Filter this meal</span>
+          <button onClick={onClose} style={{ border: "none", background: "#F3F1E8", borderRadius: "50%", width: 30, height: 30, cursor: "pointer", color: C.faint }}>✕</button>
+        </div>
+
+        <PopTitle>Time</PopTitle>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
+          <PopChip on={!maxTime} color={C.gold} onClick={() => setMaxTime(null)}>Any</PopChip>
+          {TIME_OPTIONS.map((t) => (
+            <PopChip key={t} on={maxTime === t} color={C.gold} onClick={() => setMaxTime(maxTime === t ? null : t)}>
+              ⏱ ≤{t} min
+            </PopChip>
+          ))}
+        </div>
+
+        <PopTitle>Cuisine</PopTitle>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }}>
+          {CUISINE_OPTIONS.map((c) => (
+            <PopChip key={c} on={cuisines.includes(c)} color={C.purple} onClick={() => toggle(c)}>{c}</PopChip>
+          ))}
+        </div>
+
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={() => { setCuisines([]); setMaxTime(null); }} style={{
+            flex: 1, padding: "11px 0", borderRadius: 12, border: `1.5px solid ${C.line}`,
+            background: "#fff", color: C.faint, fontFamily: "inherit", fontWeight: 700, fontSize: 14, cursor: "pointer",
+          }}>Clear</button>
+          <button onClick={() => onApply({ cuisines, maxTime })} style={{ ...btnPrimary, flex: 2 }}>Apply</button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function MatchesTab({ matches, persist, pantry, persistPantry, staples, shopping, persistShopping, openTarget, clearOpenTarget, bumpStock, cooked, persistCooked }) {
