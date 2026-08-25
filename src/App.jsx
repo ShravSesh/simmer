@@ -2805,6 +2805,7 @@ function MealPrepTab({ pantry, staples, allRecipes, mode }) {
   const [cellFilters, setCellFilters] = useState({});
   const [openKey, setOpenKey] = useState(null);
   const [filterKey, setFilterKey] = useState(null);
+  const seenRef = useRef({});
   const { toast, setToast, showToast } = useToast();
 
   const cellKey = (d, meal) => `${d}:${meal}`;
@@ -2842,32 +2843,51 @@ function MealPrepTab({ pantry, staples, allRecipes, mode }) {
     setPlan((prev) => fillPlan(prev));
   }, [span, fillPlan]);
 
+  // What every slot other than `k` is already using, so a swap never
+  // duplicates another meal in the plan.
+  const usedElsewhere = (source, k) => new Set(Object.entries(source)
+    .filter(([key, r]) => key !== k && r)
+    .map(([, r]) => r.name.toLowerCase()));
+
   const replaceCell = (d, meal) => {
     const k = cellKey(d, meal);
-    setPlan((prev) => {
-      const used = new Set(Object.entries(prev)
-        .filter(([key, r]) => key !== k && r)
-        .map(([, r]) => r.name.toLowerCase()));
-      const hit = pickFor(meal, used, cellFilters[k]);
-      if (!hit) { showToast("Nothing else matches that slot"); return prev; }
-      return { ...prev, [k]: hit };
-    });
+    const current = plan[k];
+    const elsewhere = usedElsewhere(plan, k);
+
+    // The slot's own history. Excluding only `elsewhere` would leave the card
+    // that is already here in the running, and it is by definition the
+    // top-ranked one for this slot — so the swipe would re-pick it and look
+    // like nothing happened. Carrying the history forward also stops repeated
+    // swipes ping-ponging between the same best two.
+    let seen = seenRef.current[k] || new Set();
+    if (current) seen.add(current.name.toLowerCase());
+
+    let hit = pickFor(meal, new Set([...elsewhere, ...seen]), cellFilters[k]);
+    if (!hit) {
+      // Rotation exhausted: start it over rather than dead-ending the slot,
+      // still holding back whatever is on screen right now.
+      seen = new Set(current ? [current.name.toLowerCase()] : []);
+      hit = pickFor(meal, new Set([...elsewhere, ...seen]), cellFilters[k]);
+    }
+    if (!hit) { showToast("Nothing else matches that slot"); return; }
+
+    seen.add(hit.name.toLowerCase());
+    seenRef.current[k] = seen;
+    setPlan((prev) => ({ ...prev, [k]: hit }));
   };
 
   const applyCellFilter = (k, filter) => {
     setCellFilters((f) => ({ ...f, [k]: filter }));
-    const [d, meal] = k.split(":");
-    setPlan((prev) => {
-      const used = new Set(Object.entries(prev)
-        .filter(([key, r]) => key !== k && r)
-        .map(([, r]) => r.name.toLowerCase()));
-      const hit = pickFor(meal, used, filter);
-      if (!hit) { showToast("No recipe fits those filters"); return prev; }
-      return { ...prev, [k]: hit };
-    });
+    const [, meal] = k.split(":");
+    // A new filter is a new candidate space, so the old rotation is meaningless.
+    delete seenRef.current[k];
+    const hit = pickFor(meal, usedElsewhere(plan, k), filter);
+    if (!hit) { showToast("No recipe fits those filters"); return; }
+    seenRef.current[k] = new Set([hit.name.toLowerCase()]);
+    setPlan((prev) => ({ ...prev, [k]: hit }));
   };
 
-  const reshuffle = () => setPlan(fillPlan({}));
+  const reshuffle = () => { seenRef.current = {}; setPlan(fillPlan({})); };
 
   const open = openKey ? plan[openKey] : null;
 
