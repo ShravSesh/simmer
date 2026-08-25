@@ -17,7 +17,8 @@ import b13 from "./recipes13.js";
 import b14 from "./recipes14.js";
 import b15 from "./recipes15.js";
 import b16 from "./recipes16.js";
+import b17 from "./recipes17.js";
 
-export const RECIPES = [...b1, ...b2, ...b3, ...b4, ...b5, ...b6, ...b7, ...b8, ...b9, ...b10, ...b11, ...b12, ...b13, ...b14, ...b15, ...b16];
+export const RECIPES = [...b1, ...b2, ...b3, ...b4, ...b5, ...b6, ...b7, ...b8, ...b9, ...b10, ...b11, ...b12, ...b13, ...b14, ...b15, ...b16, ...b17];
 
 export const CUISINES = [...new Set(RECIPES.map((r) => r.cuisine))];
