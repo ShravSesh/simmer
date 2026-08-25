@@ -1,7 +1,8 @@
 # 🔥 Simmer — swipe right on dinner
 
-A pantry-driven recipe swiping app with a built-in repository of **607
-vegetarian (egg-free) recipes across 31 cuisines**, at least 15 of each. No AI keys, no
+A pantry-driven recipe swiping app with a built-in repository of **616
+vegetarian (egg-free) recipes across 31 cuisines**, at least 15 of each,
+including 36 salads. No AI keys, no
 per-use costs — recipe matching runs entirely on-device. Installable on phones
 (PWA), with shared households synced through Supabase.
 
@@ -37,7 +38,7 @@ per-use costs — recipe matching runs entirely on-device. Installable on phones
    and on app focus.
 
 ## The recipe repository
-- Lives in `src/data/recipes1.js` … `recipes14.js` (+ `index.js`).
+- Lives in `src/data/recipes1.js` … `recipes15.js` (+ `index.js`).
 - Each recipe: id, name, cuisine, meal, minutes, description, base servings,
   matchable core ingredients, full quantified ingredient list, steps, macros.
 - Edit or add recipes anytime — keep ids and names unique, keep every

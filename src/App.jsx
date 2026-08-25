@@ -80,6 +80,7 @@ const MEAL_OPTIONS = [
   { id: "dinner", label: "Dinner", emoji: "🍽️" },
   { id: "dessert", label: "Dessert", emoji: "🍰" },
   { id: "snack", label: "Snack", emoji: "🍿" },
+  { id: "salad", label: "Salad", emoji: "🥗" },
 ];
 
 const QUICK_ADD = [
@@ -325,19 +326,69 @@ const rankedByCloseness = (cuisine) => {
   return Object.entries(row).sort((a, b) => b[1] - a[1]).map(([c]) => c);
 };
 
-// Cuisines least like everything in `rejected`, furthest first.
+// Geography is the one thing NOT derivable from ingredients — two cuisines can
+// share a pantry and sit continents apart — so this map is hand-authored.
 //
-// Scored on the worst case — a candidate is only "far" if it is far from
-// EVERY rejected cuisine, otherwise after rejecting Thai and Italian we could
-// serve Vietnamese on the grounds that it is unlike Italian.
+// It exists to stop the deck pooling. 13 of the 31 cuisines are South Asian,
+// so ranking purely by ingredient distance hands back a screen of Indian food:
+// "furthest from Thai" scored bengali, rajasthani, punjabi and maharashtrian
+// as the top four, which is technically true and useless as a change of scene.
+const CUISINE_REGION = {
+  "north indian": "south asia", "south indian": "south asia", punjabi: "south asia",
+  gujarati: "south asia", rajasthani: "south asia", bengali: "south asia",
+  maharashtrian: "south asia", andhra: "south asia", karnataka: "south asia",
+  kerala: "south asia", tamil: "south asia", mangalorean: "south asia",
+  "indo-chinese": "south asia",
+  chinese: "east asia", japanese: "east asia", korean: "east asia",
+  thai: "southeast asia", vietnamese: "southeast asia",
+  malaysian: "southeast asia", indonesian: "southeast asia",
+  "middle eastern": "west asia", moroccan: "north africa",
+  ethiopian: "east africa", "west african": "west africa",
+  italian: "south europe", spanish: "south europe", mediterranean: "south europe",
+  continental: "north europe",
+  mexican: "latin america", peruvian: "latin america",
+  fusion: "other",
+};
+const regionOf = (c) => CUISINE_REGION[c] || "other";
+
+// Cuisines least like everything in `rejected`, spread across regions.
+//
+// Distance is scored on the worst case — a candidate only counts as far if it
+// is far from EVERY rejected cuisine, otherwise after rejecting Thai and
+// Italian we could serve Vietnamese on the grounds it is unlike Italian.
+//
+// The result is then round-robined across regions rather than returned in
+// straight distance order, so the head of the list is one option from each
+// part of the world instead of five from whichever region happens to be
+// over-represented in the repository.
 const furthestFrom = (rejected) => {
   const from = [...new Set(rejected.filter((c) => CUISINE_SIM.sim[c]))];
   if (!from.length) return [];
-  return CUISINE_SIM.names
+  const rejectedRegions = new Set(from.map(regionOf));
+
+  const scored = CUISINE_SIM.names
     .filter((c) => !from.includes(c))
-    .map((c) => [c, Math.max(...from.map((r) => CUISINE_SIM.sim[r][c] ?? 0))])
-    .sort((a, b) => a[1] - b[1])
-    .map(([c]) => c);
+    .map((c) => ({ c, d: Math.max(...from.map((r) => CUISINE_SIM.sim[r][c] ?? 0)), region: regionOf(c) }))
+    .sort((a, b) => a.d - b.d);
+
+  // A different region is the point of the jump, so those come first; the
+  // rejects' own region is kept only as a fallback if nothing else is left.
+  const near = scored.filter((x) => rejectedRegions.has(x.region));
+  const away = scored.filter((x) => !rejectedRegions.has(x.region));
+
+  const byRegion = {};
+  for (const x of away) (byRegion[x.region] = byRegion[x.region] || []).push(x);
+  // Regions ordered by their best candidate, then taken one at a time.
+  const regions = Object.keys(byRegion).sort((a, b) => byRegion[a][0].d - byRegion[b][0].d);
+  const out = [];
+  for (let i = 0; ; i++) {
+    let added = false;
+    for (const r of regions) {
+      if (byRegion[r][i]) { out.push(byRegion[r][i].c); added = true; }
+    }
+    if (!added) break;
+  }
+  return [...out, ...near.map((x) => x.c)];
 };
 
 /* ==================================================================
@@ -400,7 +451,7 @@ function pickFromRepo(recipes, { pantry, staples, mode, exclude, swipes, cuisine
   const wanted = new Set(cuisines.map((c) => c.toLowerCase()));
   // Time-of-day meal preference (device local time, soft boost)
   const hr = new Date().getHours();
-  const timeMeals = hr < 10 ? ["breakfast"] : hr < 14 ? ["lunch"] : hr < 18 ? ["snack", "dessert"] : ["dinner"];
+  const timeMeals = hr < 10 ? ["breakfast"] : hr < 14 ? ["lunch", "salad"] : hr < 18 ? ["snack", "dessert"] : ["dinner"];
   const candidates = recipes
     .filter((r) => !exclude.has(r.name.toLowerCase()))
     .filter((r) => !wanted.size || wanted.has((r.cuisine || "").toLowerCase()))
@@ -449,18 +500,23 @@ function pickFromRepo(recipes, { pantry, staples, mode, exclude, swipes, cuisine
     // Fill first from pantry hits, then round-robin freebies across cuisines
     picks = pantryHits.slice(0, count);
     if (picks.length < count) {
-      const byCuisine = {};
+      // Round-robin by REGION, not cuisine. With 13 South Asian labels a
+      // per-cuisine rotation still returns a mostly-Indian deck; per-region
+      // gives one from each part of the world before repeating any.
+      const byRegion = {};
       for (const c of freebies) {
-        const cz = (c.r.cuisine || "").toLowerCase();
-        (byCuisine[cz] = byCuisine[cz] || []).push(c);
+        const reg = regionOf((c.r.cuisine || "").toLowerCase());
+        (byRegion[reg] = byRegion[reg] || []).push(c);
       }
-      const czKeys = Object.keys(byCuisine).sort(() => Math.random() - 0.5);
+      // Shuffle within each region so the same cuisine doesn't always lead it.
+      for (const reg of Object.keys(byRegion)) byRegion[reg].sort(() => Math.random() - 0.5);
+      const regKeys = Object.keys(byRegion).sort(() => Math.random() - 0.5);
       let round = 0;
       while (picks.length < count) {
         let added = false;
-        for (const cz of czKeys) {
+        for (const reg of regKeys) {
           if (picks.length >= count) break;
-          if (byCuisine[cz][round]) { picks.push(byCuisine[cz][round]); added = true; }
+          if (byRegion[reg][round]) { picks.push(byRegion[reg][round]); added = true; }
         }
         if (!added) break;
         round++;
@@ -1298,7 +1354,7 @@ function HouseholdPanel({ code, poolCount, syncError, onCreate, onJoin, onLeave,
 
 /* ------------------------- Custom recipes ------------------------- */
 
-const MEAL_IDS = ["breakfast", "lunch", "dinner", "dessert", "snack"];
+const MEAL_IDS = ["breakfast", "lunch", "dinner", "dessert", "snack", "salad"];
 
 function parseIngLine(line) {
   const t = line.trim();
