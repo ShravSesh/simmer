@@ -952,6 +952,13 @@ export default function Simmer() {
       const last = h[h.length - 1];
       setDeck((d) => [{ ...last.card, id: uid() }, ...d]);
       setSwipes((s) => s.slice(0, -1));
+      // Drop it from `seen` too. Putting the card back in the deck is not
+      // enough on its own — `seen` is the exclude list for dealing, so without
+      // this the card would vanish again on the next shuffle.
+      setSeen((sn) => {
+        const i = sn.lastIndexOf(last.card.name);
+        return i === -1 ? sn : [...sn.slice(0, i), ...sn.slice(i + 1)];
+      });
       if (last.dir === "right" && last.savedAt) {
         persistMatches((matchesRef.current || []).filter((m) => m.savedAt !== last.savedAt));
       }
@@ -1083,6 +1090,7 @@ export default function Simmer() {
       {matchFlash && (
         <MatchFlash
           card={matchFlash.card}
+          onUndo={undoSwipe}
           onCook={() => {
             setOpenTarget(matchFlash.savedAt);
             setMatchFlash(null);
@@ -1205,7 +1213,7 @@ const Center = ({ children }) => (
 
 /* --------------------------- match flash -------------------------- */
 
-function MatchFlash({ card, onCook }) {
+function MatchFlash({ card, onCook, onUndo }) {
   return (
     <div onClick={onCook} style={{
       position: "absolute", bottom: 72, left: 16, right: 16, zIndex: 60,
@@ -1221,6 +1229,19 @@ function MatchFlash({ card, onCook }) {
         </div>
         <div style={{ color: "#ffffffAA", fontSize: 11.5 }}>→ view recipe</div>
       </div>
+      {onUndo && (
+        // Sits inside a card whose whole surface opens the recipe, so this has
+        // to stop the click travelling up, or undoing would also navigate.
+        <button
+          onClick={(e) => { e.stopPropagation(); onUndo(); }}
+          aria-label="Undo this swipe"
+          style={{
+            border: "1.5px solid #ffffff88", background: "#ffffff22", color: "#fff",
+            borderRadius: 99, padding: "5px 11px", fontFamily: "inherit",
+            fontWeight: 800, fontSize: 12, cursor: "pointer", flexShrink: 0,
+          }}
+        >↩️ Undo</button>
+      )}
       <span style={{ color: "#fff", fontSize: 18 }}>→</span>
     </div>
   );
@@ -2232,10 +2253,10 @@ function SwipeTab({ pantry, deck, exhausted, onResetSeen, allRecipes, staples, p
         />
         {canUndo && (
           <button onClick={onUndo} aria-label="Undo last swipe" style={{
-            flexShrink: 0, border: `1.5px solid ${C.line}`, background: "#fff", color: C.ink,
-            borderRadius: 99, padding: "5px 11px", fontFamily: "inherit",
-            fontWeight: 700, fontSize: 12, cursor: "pointer",
-          }}>↩️</button>
+            flexShrink: 0, border: `1.5px solid ${C.purple}`, background: C.purpleSoft,
+            color: C.purple, borderRadius: 99, padding: "5px 12px", fontFamily: "inherit",
+            fontWeight: 800, fontSize: 12, cursor: "pointer",
+          }}>↩️ Undo</button>
         )}
         {swipes.length > 0 && (
           <button onClick={onReset} style={{
