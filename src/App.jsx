@@ -3612,6 +3612,7 @@ function MealPrepTab({ pantry, staples, allRecipes, mode }) {
   const [openKey, setOpenKey] = useState(null);
   const [filterKey, setFilterKey] = useState(null);
   const [kidsOnly, setKidsOnly] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const seenRef = useRef({});
   const { toast, setToast, showToast } = useToast();
 
@@ -3703,15 +3704,24 @@ function MealPrepTab({ pantry, staples, allRecipes, mode }) {
 
   const reshuffle = () => { seenRef.current = {}; setPlan(fillPlan({})); };
 
-  // A plan built from the full corpus is not a kids plan, and vice versa, so
-  // the toggle rebuilds rather than filtering what is already there.
-  const kidsSeenRef = useRef(kidsOnly);
+  // The pool changes when kids mode is toggled, and when the household turns
+  // eggs on or off. A plan drawn from the old pool is not a plan from the new
+  // one — it can hold recipes the new pool does not contain — so it is rebuilt
+  // wholesale.
+  //
+  // Rebuilt *here*, in one step, rather than emptied and left to the fill
+  // effect above. Effects run in declaration order: on the render where the
+  // pool changes, the fill effect runs first, sees a plan whose cells are all
+  // occupied, and keeps every one of them. Emptying the plan afterwards then
+  // leaves the grid blank forever, because `fillPlan`'s identity does not
+  // change again and the fill effect never re-runs.
+  const poolSeenRef = useRef(pool);
   useEffect(() => {
-    if (kidsSeenRef.current === kidsOnly) return;
-    kidsSeenRef.current = kidsOnly;
+    if (poolSeenRef.current === pool) return;
+    poolSeenRef.current = pool;
     seenRef.current = {};
-    setPlan({});
-  }, [kidsOnly]);
+    setPlan(fillPlan({}));
+  }, [pool, fillPlan]);
 
   const open = openKey ? plan[openKey] : null;
 
@@ -3723,6 +3733,8 @@ function MealPrepTab({ pantry, staples, allRecipes, mode }) {
     downloadDoc(html, `simmer-meal-prep-${span}-days.doc`);
     showToast("Word document downloaded");
   };
+
+  const runExport = (how) => { setMenuOpen(false); exportDoc(how); };
 
   if (!pantry?.length) {
     return (
@@ -3769,6 +3781,49 @@ function MealPrepTab({ pantry, staples, allRecipes, mode }) {
           color: C.faint, borderRadius: 99, padding: "6px 12px",
           fontFamily: "inherit", fontWeight: 700, fontSize: 12, cursor: "pointer",
         }}>🔄 Reshuffle</button>
+
+        {/* Export lives behind one icon-width button so it costs the row
+            almost nothing; the menu is anchored to it. */}
+        <div style={{ position: "relative" }}>
+          <button
+            onClick={() => setMenuOpen((v) => !v)}
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            aria-label="Export this plan"
+            title="Export"
+            style={{
+              border: `1.5px solid ${menuOpen ? C.green : C.line}`,
+              background: menuOpen ? C.greenSoft : "#fff",
+              color: menuOpen ? C.green : C.faint,
+              borderRadius: 99, width: 30, height: 28, padding: 0,
+              fontFamily: "inherit", fontWeight: 800, fontSize: 14,
+              cursor: "pointer", lineHeight: 1,
+            }}
+          >⋯</button>
+          {menuOpen && (
+            <>
+              {/* Click-away layer, so the menu closes without a document
+                  listener that would have to be torn down. */}
+              <div
+                onClick={() => setMenuOpen(false)}
+                style={{ position: "fixed", inset: 0, zIndex: 40 }}
+              />
+              <div role="menu" style={{
+                position: "absolute", top: 32, right: 0, zIndex: 41,
+                background: "#fff", border: `1.5px solid ${C.line}`, borderRadius: 12,
+                boxShadow: "0 8px 24px rgba(30,43,32,.16)", padding: 4,
+                minWidth: 148, display: "flex", flexDirection: "column", gap: 2,
+              }}>
+                <div style={{
+                  fontSize: 10, fontWeight: 800, color: C.faint, textTransform: "uppercase",
+                  letterSpacing: "0.05em", padding: "5px 9px 3px",
+                }}>Export plan</div>
+                <button role="menuitem" onClick={() => runExport("print")} style={menuItem}>🖨 Print / PDF</button>
+                <button role="menuitem" onClick={() => runExport("word")} style={menuItem}>📄 Word document</button>
+              </div>
+            </>
+          )}
+        </div>
       </div>
 
       <div style={{ display: "flex", gap: 4, marginBottom: 10, flexWrap: "wrap", alignItems: "center" }}>
@@ -3782,12 +3837,6 @@ function MealPrepTab({ pantry, staples, allRecipes, mode }) {
             fontWeight: 700, fontSize: 11.5, cursor: "pointer",
           }}>{d}</button>
         ))}
-      </div>
-
-      <div style={{ display: "flex", gap: 6, marginBottom: 10, alignItems: "center" }}>
-        <span style={{ fontSize: 11, color: C.faint, fontWeight: 700 }}>Export</span>
-        <button onClick={() => exportDoc("print")} style={exportBtn}>🖨 PDF</button>
-        <button onClick={() => exportDoc("word")} style={exportBtn}>📄 Word</button>
       </div>
 
       <p style={{ fontSize: 11, color: C.faint, margin: "0 0 8px", lineHeight: 1.5 }}>
@@ -4023,10 +4072,11 @@ function PrepRecipeSheet({ recipe, onClose }) {
   );
 }
 
-const exportBtn = {
-  border: `1.5px solid ${C.line}`, background: "#fff", color: C.ink,
-  borderRadius: 99, padding: "5px 12px", fontFamily: "inherit",
-  fontWeight: 700, fontSize: 12, cursor: "pointer",
+const menuItem = {
+  border: "none", background: "transparent", color: C.ink,
+  borderRadius: 8, padding: "8px 9px", fontFamily: "inherit",
+  fontWeight: 700, fontSize: 13, cursor: "pointer", textAlign: "left",
+  width: "100%",
 };
 
 const stepBtn = {
