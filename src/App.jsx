@@ -144,7 +144,15 @@ const nsKeys = (code) => ({
   // Stored as edits rather than a full list so the built-in suggestions can
   // still grow in future releases without overwriting anyone's changes.
   quick: code ? `hh:${code}:quick-add` : "simmer-quick-add",
+  // "egg-free" (default) or "eggs". Household-scoped on purpose: a household
+  // shares one kitchen, so the toggle follows the pantry rather than the device.
+  diet: code ? `hh:${code}:diet` : "simmer-diet",
 });
+
+// Recipes and pantry suggestions that only make sense once eggs are allowed.
+const DIET_EGG_FREE = "egg-free";
+const usesEgg = (r) => (r?.tags || []).includes("egg");
+const EGG_PANTRY = ["eggs"];
 
 /* ==================================================================
    Ingredient matching
@@ -644,6 +652,7 @@ export default function Simmer() {
   const [community, setCommunity] = useState([]);
   const [cooked, setCooked] = useState([]);
   const [quickEdits, setQuickEdits] = useState({ add: [], hide: [] });
+  const [diet, setDiet] = useState(DIET_EGG_FREE);
   const [recipeSheet, setRecipeSheet] = useState(false);
   const [favSheet, setFavSheet] = useState(false);
   const [cookedSheet, setCookedSheet] = useState(false);
@@ -679,6 +688,7 @@ export default function Simmer() {
   const shoppingRef = useRef(shopping); shoppingRef.current = shopping;
   const cookedRef = useRef(cooked); cookedRef.current = cooked;
   const quickEditsRef = useRef(quickEdits); quickEditsRef.current = quickEdits;
+  const dietRef = useRef(diet); dietRef.current = diet;
 
   // Which namespace the in-memory state was actually loaded from: a household
   // code, or null for solo. `undefined` means nothing has loaded yet. Writes
@@ -690,7 +700,7 @@ export default function Simmer() {
   // alternative (falling back to empty) is what used to overwrite real data.
   const loadNamespace = useCallback(async (code) => {
     const k = nsKeys(code);
-    const [p, m, s, sh, sc, ck, qa] = await Promise.all([
+    const [p, m, s, sh, sc, ck, qa, dt] = await Promise.all([
       loadKey(k.pantry, []),
       loadKey(k.matches, []),
       loadKey(k.staples, STAPLES_LIST),
@@ -698,6 +708,7 @@ export default function Simmer() {
       loadKey(k.stock, {}),
       loadKey(k.cooked, []),
       loadKey(k.quick, { add: [], hide: [] }),
+      loadKey(k.diet, DIET_EGG_FREE),
     ]);
     // Staples migration. Older builds stored a bare array; current builds
     // store {v, items}. Two cases are handled differently on purpose:
@@ -725,6 +736,8 @@ export default function Simmer() {
     setPantry(pantryItems); setMatches(m); setStaples(migrated); setShopping(sh); setStockCounts(sc || {});
     setCooked(Array.isArray(ck) ? ck : []);
     setQuickEdits({ add: qa?.add || [], hide: qa?.hide || [] });
+    // Anything unrecognised falls back to egg-free — the safe default.
+    setDiet(dt === "eggs" ? "eggs" : DIET_EGG_FREE);
     // Only now does state genuinely represent this namespace, so only now is
     // it safe to write back to it. On a throw above we never reach this line.
     loadedCodeRef.current = code ?? null;
@@ -784,7 +797,13 @@ export default function Simmer() {
     return () => { clearInterval(iv); document.removeEventListener("visibilitychange", onVis); };
   }, [loadCommunity]);
 
-  const allRecipes = React.useMemo(() => [...REPO, ...community], [community]);
+  // Egg recipes are held back unless the household has opted in. Filtering at
+  // the pool means the deck, the meal-prep grid and the filter counts all agree
+  // without each having to remember the rule.
+  const allRecipes = React.useMemo(
+    () => [...REPO, ...community].filter((r) => diet === "eggs" || !usesEgg(r)),
+    [community, diet],
+  );
   const allRecipesRef = useRef(allRecipes); allRecipesRef.current = allRecipes;
 
   // Every shared write can fail (offline, RLS, unconfigured build). Surface it
@@ -823,6 +842,7 @@ export default function Simmer() {
   const persistShopping = useCallback((next) => persistNs("shopping", next, setShopping), [persistNs]);
   const persistCooked = useCallback((next) => persistNs("cooked", next, setCooked), [persistNs]);
   const persistQuickEdits = useCallback((next) => persistNs("quick", next, setQuickEdits), [persistNs]);
+  const persistDiet = useCallback((next) => persistNs("diet", next, setDiet), [persistNs]);
 
   const stockRef = useRef(stockCounts); stockRef.current = stockCounts;
   // learn what the household actually stocks: bump on pantry adds and shopping-list buys
@@ -884,6 +904,7 @@ export default function Simmer() {
         saveKey(k.shopping, shoppingRef.current || []),
         saveKey(k.cooked, cookedRef.current || []),
         saveKey(k.quick, quickEditsRef.current || { add: [], hide: [] }),
+        saveKey(k.diet, dietRef.current || DIET_EGG_FREE),
       ]);
       await saveKey(`hh:${code}:meta`, { createdAt: Date.now() });
       // The writes above seeded this household *from* current state, so state
@@ -972,6 +993,16 @@ export default function Simmer() {
     }
   }, [tab, pantry, deck.length, exhausted, mode, cuisines, maxTime, mealType]);
 
+  // Turning eggs off has to reach cards that were already dealt. Filtering the
+  // pool only governs the *next* deal, so without this an egg recipe stays on
+  // screen until it is swiped, and undo could even bring one back. Emptying the
+  // deck here lets the effect above re-deal from the now-filtered pool.
+  useEffect(() => {
+    if (diet === "eggs") return;
+    setDeck((d) => (d.some(usesEgg) ? d.filter((c) => !usesEgg(c)) : d));
+    setHistory((h) => (h.some((e) => usesEgg(e.card)) ? h.filter((e) => !usesEgg(e.card)) : h));
+  }, [diet]);
+
   const handleSwipe = useCallback(
     (card, dir) => {
       const nextSwipes = [...swipes, { name: card.name, cuisine: card.cuisine, dir }];
@@ -1053,7 +1084,7 @@ export default function Simmer() {
     let timer = null;
     const unsubscribe = subscribeKeys(
       `hh:${code}`,
-      [k.pantry, k.matches, k.staples, k.shopping, k.stock, k.cooked, k.quick],
+      [k.pantry, k.matches, k.staples, k.shopping, k.stock, k.cooked, k.quick, k.diet],
       () => {
         clearTimeout(timer);
         timer = setTimeout(() => {
@@ -1128,6 +1159,7 @@ export default function Simmer() {
         <HouseholdPanel
           syncError={syncError}
           code={profile.code} poolCount={community.length}
+          diet={diet} onDiet={persistDiet}
           onCreate={createHousehold} onJoin={joinHousehold}
           onLeave={leaveHousehold} onClose={() => setHhOpen(false)}
         />
@@ -1143,7 +1175,7 @@ export default function Simmer() {
           }}
         />
       )}
-      {tab === "pantry" && <PantryTab pantry={pantry} persist={persistPantry} staples={staples} persistStaples={persistStaples} shopping={shopping} persistShopping={persistShopping} matches={matches} stockCounts={stockCounts} bumpStock={bumpStock} quickEdits={quickEdits} persistQuickEdits={persistQuickEdits} />}
+      {tab === "pantry" && <PantryTab diet={diet} pantry={pantry} persist={persistPantry} staples={staples} persistStaples={persistStaples} shopping={shopping} persistShopping={persistShopping} matches={matches} stockCounts={stockCounts} bumpStock={bumpStock} quickEdits={quickEdits} persistQuickEdits={persistQuickEdits} />}
       {tab === "swipe" && (
         <SwipeTab
           pantry={pantry} deck={deck} exhausted={exhausted} onResetSeen={resetSeen}
@@ -1313,7 +1345,7 @@ function MatchFlash({ card, onCook, onUndo }) {
 
 /* ------------------------- household panel ------------------------ */
 
-function HouseholdPanel({ code, poolCount, syncError, onCreate, onJoin, onLeave, onClose }) {
+function HouseholdPanel({ code, poolCount, syncError, diet, onDiet, onCreate, onJoin, onLeave, onClose }) {
   const [joinCode, setJoinCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
@@ -1359,6 +1391,44 @@ function HouseholdPanel({ code, poolCount, syncError, onCreate, onJoin, onLeave,
                 "Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY in Vercel, then redeploy."}
           </p>
         )}
+
+        <div style={{
+          border: `1.5px solid ${C.line}`, borderRadius: 14, padding: "12px 13px", marginBottom: 14,
+        }}>
+          <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 2 }}>Eggs</div>
+          <p style={{ fontSize: 12.5, color: C.faint, margin: "0 0 10px", lineHeight: 1.45 }}>
+            {diet === "eggs"
+              ? "Egg recipes are in the deck, and eggs are offered in quick add."
+              : "Egg recipes are hidden everywhere. Everything else is unaffected."}
+          </p>
+          <div style={{ display: "flex", gap: 6 }}>
+            {[
+              { id: DIET_EGG_FREE, label: "Egg-free", emoji: "🌱" },
+              { id: "eggs", label: "Eggs OK", emoji: "🥚" },
+            ].map((o) => {
+              const on = (diet === "eggs" ? "eggs" : DIET_EGG_FREE) === o.id;
+              return (
+                <button
+                  key={o.id}
+                  onClick={() => onDiet(o.id)}
+                  aria-pressed={on}
+                  style={{
+                    flex: 1, padding: "9px 0", borderRadius: 11, cursor: "pointer",
+                    border: `1.5px solid ${on ? C.green : C.line}`,
+                    background: on ? C.greenSoft : "#fff",
+                    color: on ? C.green : C.faint,
+                    fontFamily: "inherit", fontWeight: 700, fontSize: 13.5,
+                  }}
+                >{o.emoji} {o.label}</button>
+              );
+            })}
+          </div>
+          {code && (
+            <p style={{ fontSize: 11.5, color: C.faint, margin: "9px 0 0" }}>
+              This applies to everyone in the household.
+            </p>
+          )}
+        </div>
 
         {code ? (
           <>
@@ -1692,7 +1762,7 @@ function FavSheet({ matches, onClose, onOpen, onClearFavs }) {
   );
 }
 
-function PantryTab({ pantry, persist, staples, persistStaples, shopping, persistShopping, matches, stockCounts, bumpStock, quickEdits, persistQuickEdits }) {
+function PantryTab({ diet, pantry, persist, staples, persistStaples, shopping, persistShopping, matches, stockCounts, bumpStock, quickEdits, persistQuickEdits }) {
   const [subTab, setSubTab] = useState("items");
   const [name, setName] = useState("");
   const [listAdd, setListAdd] = useState("");
@@ -1926,7 +1996,15 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
               {(() => {
                 // Built-in suggestions, plus anything stocked 3+ times (learned
                 // from behaviour), plus whatever the user added by hand.
-                const staticNorms = new Set(QUICK_ADD.flatMap((g) => g.items.map((n) => norm(n))));
+                // Eggs only appear in the catalogue once the household has
+                // opted in; anyone already carrying them keeps them, since the
+                // pantry list is separate from these suggestions.
+                const catalogue = QUICK_ADD.map((g) => (
+                  g.cat === "protein" && diet === "eggs"
+                    ? { ...g, items: [...EGG_PANTRY, ...g.items] }
+                    : g
+                ));
+                const staticNorms = new Set(catalogue.flatMap((g) => g.items.map((n) => norm(n))));
                 const learned = Object.values(stockCounts || {})
                   .filter((e) => e.n >= 3 && !staticNorms.has(norm(e.name)))
                   .sort((a, b) => b.n - a.n)
@@ -1938,7 +2016,7 @@ function PantryTab({ pantry, persist, staples, persistStaples, shopping, persist
                   const cat = localGuess(n) || "other";
                   (extras[cat] = extras[cat] || []).unshift(n);
                 }
-                return QUICK_ADD.map((g) => ({ ...g, items: [...(extras[g.cat] || []), ...g.items] }));
+                return catalogue.map((g) => ({ ...g, items: [...(extras[g.cat] || []), ...g.items] }));
               })().map((g) => {
                 const meta = CATEGORIES.find((c) => c.id === g.cat);
                 if (!g.items.some((n) => inQuickAdd(n))) return null;
