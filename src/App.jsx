@@ -3605,7 +3605,7 @@ const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const PREP_SPANS = [3, 5, 7];
 
 function MealPrepTab({ pantry, staples, allRecipes, mode }) {
-  const [span, setSpan] = useState(5);
+  const [span, setSpan] = useState(3);
   const [startDay, setStartDay] = useState(() => new Date().getDay());
   const [plan, setPlan] = useState({});
   const [cellFilters, setCellFilters] = useState({});
@@ -3613,6 +3613,7 @@ function MealPrepTab({ pantry, staples, allRecipes, mode }) {
   const [filterKey, setFilterKey] = useState(null);
   const [kidsOnly, setKidsOnly] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [spanOpen, setSpanOpen] = useState(false);
   const seenRef = useRef({});
   const { toast, setToast, showToast } = useToast();
 
@@ -3639,9 +3640,17 @@ function MealPrepTab({ pantry, staples, allRecipes, mode }) {
   }, [pool, pantry, staples, mode]);
 
   // Fill every empty slot, leaving anything already there alone.
+  //
+  // Days beyond the current span are dropped first. Shrinking 7 days back to 3
+  // leaves entries for days 4-7 that nothing renders, but they still count as
+  // "used elsewhere" — so three days of meals would silently be picked from a
+  // pool with a week's worth of recipes held back.
   const fillPlan = useCallback((keep = {}, days = span, filters = cellFilters) => {
-    const used = new Set(Object.values(keep).filter(Boolean).map((r) => r.name.toLowerCase()));
-    const next = { ...keep };
+    const within = Object.fromEntries(
+      Object.entries(keep).filter(([k]) => Number(k.split(":")[0]) < days),
+    );
+    const used = new Set(Object.values(within).filter(Boolean).map((r) => r.name.toLowerCase()));
+    const next = { ...within };
     for (let d = 0; d < days; d++) {
       for (const meal of PREP_MEALS) {
         const k = cellKey(d, meal);
@@ -3752,17 +3761,52 @@ function MealPrepTab({ pantry, staples, allRecipes, mode }) {
     <div style={{ flex: 1, overflowY: "auto", padding: "8px 16px 24px", position: "relative" }}>
       <Toast toast={toast} setToast={setToast} />
 
-      {/* Span, then start day beneath it. */}
+      {/* One row: the span (collapsed to the current choice), kids, reshuffle,
+          and the options menu. */}
       <div style={{ display: "flex", gap: 6, marginBottom: 8, alignItems: "center" }}>
-        {PREP_SPANS.map((n) => (
-          <button key={n} onClick={() => setSpan(n)} style={{
-            border: `1.5px solid ${span === n ? C.green : C.line}`,
-            background: span === n ? C.greenSoft : "#fff",
-            color: span === n ? C.green : C.faint,
-            borderRadius: 99, padding: "6px 14px", fontFamily: "inherit",
-            fontWeight: 800, fontSize: 13, cursor: "pointer",
-          }}>{n} days</button>
-        ))}
+        <div style={{ position: "relative" }}>
+          <button
+            onClick={() => { setSpanOpen((v) => !v); setMenuOpen(false); }}
+            aria-haspopup="listbox"
+            aria-expanded={spanOpen}
+            aria-label={`Plan length: ${span} days`}
+            style={{
+              border: `1.5px solid ${C.green}`,
+              background: C.greenSoft, color: C.green,
+              borderRadius: 99, padding: "6px 13px", fontFamily: "inherit",
+              fontWeight: 800, fontSize: 13, cursor: "pointer",
+              display: "inline-flex", alignItems: "center", gap: 5,
+            }}
+          >
+            {span}-day
+            <span aria-hidden="true" style={{ fontSize: 9, opacity: 0.75 }}>▼</span>
+          </button>
+          {spanOpen && (
+            <>
+              <div onClick={() => setSpanOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }} />
+              <div role="listbox" style={{
+                position: "absolute", top: 34, left: 0, zIndex: 41,
+                background: "#fff", border: `1.5px solid ${C.line}`, borderRadius: 12,
+                boxShadow: "0 8px 24px rgba(30,43,32,.16)", padding: 4,
+                display: "flex", flexDirection: "column", gap: 2, minWidth: 106,
+              }}>
+                {PREP_SPANS.map((nDays) => (
+                  <button
+                    key={nDays}
+                    role="option"
+                    aria-selected={span === nDays}
+                    onClick={() => { setSpan(nDays); setSpanOpen(false); }}
+                    style={{
+                      ...menuItem,
+                      color: span === nDays ? C.green : C.ink,
+                      background: span === nDays ? C.greenSoft : "transparent",
+                    }}
+                  >{nDays}-day{span === nDays ? " ✓" : ""}</button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
         <button
           onClick={() => setKidsOnly((v) => !v)}
           aria-pressed={kidsOnly}
@@ -3786,7 +3830,7 @@ function MealPrepTab({ pantry, staples, allRecipes, mode }) {
             between them they cost the screen nothing rather than two rows. */}
         <div style={{ position: "relative" }}>
           <button
-            onClick={() => setMenuOpen((v) => !v)}
+            onClick={() => { setMenuOpen((v) => !v); setSpanOpen(false); }}
             aria-haspopup="menu"
             aria-expanded={menuOpen}
             aria-label="Plan options — start day and export"
