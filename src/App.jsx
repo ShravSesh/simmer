@@ -3782,15 +3782,15 @@ function MealPrepTab({ pantry, staples, allRecipes, mode }) {
           fontFamily: "inherit", fontWeight: 700, fontSize: 12, cursor: "pointer",
         }}>🔄 Reshuffle</button>
 
-        {/* Export lives behind one icon-width button so it costs the row
-            almost nothing; the menu is anchored to it. */}
+        {/* Start day and export both live behind one icon-width button, so
+            between them they cost the screen nothing rather than two rows. */}
         <div style={{ position: "relative" }}>
           <button
             onClick={() => setMenuOpen((v) => !v)}
             aria-haspopup="menu"
             aria-expanded={menuOpen}
-            aria-label="Export this plan"
-            title="Export"
+            aria-label="Plan options — start day and export"
+            title="Start day · export"
             style={{
               border: `1.5px solid ${menuOpen ? C.green : C.line}`,
               background: menuOpen ? C.greenSoft : "#fff",
@@ -3812,31 +3812,37 @@ function MealPrepTab({ pantry, staples, allRecipes, mode }) {
                 position: "absolute", top: 32, right: 0, zIndex: 41,
                 background: "#fff", border: `1.5px solid ${C.line}`, borderRadius: 12,
                 boxShadow: "0 8px 24px rgba(30,43,32,.16)", padding: 4,
-                minWidth: 148, display: "flex", flexDirection: "column", gap: 2,
+                minWidth: 186, display: "flex", flexDirection: "column", gap: 2,
               }}>
-                <div style={{
-                  fontSize: 10, fontWeight: 800, color: C.faint, textTransform: "uppercase",
-                  letterSpacing: "0.05em", padding: "5px 9px 3px",
-                }}>Export plan</div>
+                <div style={menuLabel}>Start day</div>
+                {/* The day chips wrap inside the menu instead of taking a whole
+                    row of the screen. Choosing one keeps the menu open — the
+                    grid relabels underneath, and picking a day is the kind of
+                    thing you may want to adjust twice. */}
+                <div style={{ display: "flex", gap: 3, flexWrap: "wrap", padding: "0 5px 6px" }}>
+                  {DAY_NAMES.map((d, i) => (
+                    <button
+                      key={d}
+                      onClick={() => setStartDay(i)}
+                      aria-pressed={startDay === i}
+                      style={{
+                        border: `1.5px solid ${startDay === i ? C.gold : C.line}`,
+                        background: startDay === i ? C.goldSoft : "#fff",
+                        color: startDay === i ? "#9A6700" : C.faint,
+                        borderRadius: 99, padding: "4px 8px", fontFamily: "inherit",
+                        fontWeight: 700, fontSize: 11.5, cursor: "pointer",
+                      }}
+                    >{d}</button>
+                  ))}
+                </div>
+                <div style={{ height: 1, background: C.line, margin: "2px 5px 4px" }} />
+                <div style={menuLabel}>Export plan</div>
                 <button role="menuitem" onClick={() => runExport("print")} style={menuItem}>🖨 Print / PDF</button>
                 <button role="menuitem" onClick={() => runExport("word")} style={menuItem}>📄 Word document</button>
               </div>
             </>
           )}
         </div>
-      </div>
-
-      <div style={{ display: "flex", gap: 4, marginBottom: 10, flexWrap: "wrap", alignItems: "center" }}>
-        <span style={{ fontSize: 11, color: C.faint, fontWeight: 700, marginRight: 2 }}>Start</span>
-        {DAY_NAMES.map((d, i) => (
-          <button key={d} onClick={() => setStartDay(i)} style={{
-            border: `1.5px solid ${startDay === i ? C.gold : C.line}`,
-            background: startDay === i ? C.goldSoft : "#fff",
-            color: startDay === i ? "#9A6700" : C.faint,
-            borderRadius: 99, padding: "4px 9px", fontFamily: "inherit",
-            fontWeight: 700, fontSize: 11.5, cursor: "pointer",
-          }}>{d}</button>
-        ))}
       </div>
 
       <p style={{ fontSize: 11, color: C.faint, margin: "0 0 8px", lineHeight: 1.5 }}>
@@ -4071,6 +4077,11 @@ function PrepRecipeSheet({ recipe, onClose }) {
     </div>
   );
 }
+
+const menuLabel = {
+  fontSize: 10, fontWeight: 800, color: C.faint, textTransform: "uppercase",
+  letterSpacing: "0.05em", padding: "5px 9px 3px",
+};
 
 const menuItem = {
   border: "none", background: "transparent", color: C.ink,
