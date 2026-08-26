@@ -183,6 +183,15 @@ const isDrink = (card) => DRINK_RE.test(card?.name || "");
 // Chutney & Idli" is a breakfast and can take a protein source, a jar of lime
 // pickle cannot.
 const CONDIMENT_RE = /\b(pickle|chutney|podi|thecha|relish|jam|dip|dressing|raita|pachadi|salsa|sambal|masala powder|spice mix)\b/i;
+// Sweet or savoury, judged from the ingredients rather than a keyword list of
+// dish names. This decides which protein source is even plausible: a scoop of
+// powder disappears into anything sweet, a cup of chickpeas does not.
+const SWEET_RE = /condensed milk|\bsugar\b|jaggery|honey|syrup|chocolate|\bjam\b|milkmaid|custard|\bcocoa\b/;
+const SAVOURY_RE = /onion|garlic|chilli|chili|\bcumin\b|masala|soy sauce|\bpepper\b|tomato|curry leaves|mustard seeds|vinegar|sriracha|gochujang|\bmiso\b|sesame oil|\bginger\b|cheese/;
+const isSweet = (card, rows) => card?.mealType === "dessert"
+  || (["breakfast", "snack"].includes(card?.mealType)
+      && anyRow(rows, SWEET_RE) && !anyRow(rows, SAVOURY_RE));
+
 const isCondiment = (card) => {
   const nm = card?.name || "";
   return CONDIMENT_RE.test(nm) && !/[&+]|with /i.test(nm);
@@ -191,7 +200,9 @@ const isCondiment = (card) => {
 // FAT_TRIM is what can safely be halved in the ingredient list, FAT_DAIRY is
 // fat that has to be swapped rather than cut — halving the milk in a porridge
 // gives you less porridge, not a lighter one.
-const FAT_TRIM = /\boil\b|\bghee\b|\bbutter\b|peanuts?|cashews?|almonds?|walnuts?|pistachios?|pine nuts?|sesame seeds|grated coconut|tahini|nut butter|avocado|olives/;
+const OIL_RE = /\boil\b|\bghee\b|\bbutter\b|tahini|nut butter/;
+const NUT_RE = /peanuts?|cashews?|almonds?|walnuts?|pistachios?|pine nuts?|sesame seeds|grated coconut|avocado|olives/;
+const FAT_TRIM = new RegExp(`${OIL_RE.source}|${NUT_RE.source}`);
 const FAT_DAIRY = /\bmilk\b|\bcream\b|mayonnaise|\bcheese\b|khoya|condensed milk/;
 const FAT_CARRIER = new RegExp(`${FAT_TRIM.source}|${FAT_DAIRY.source}`);
 const isHealthy = (m) => !!m && proteinShare(m) >= HEALTHY_PROTEIN_SHARE && m.cal <= HEALTHY_CAL;
@@ -204,6 +215,49 @@ const mapRow = (rows, re, fn) => (rows || []).map((r) => (re.test(rowName(r).toL
 // Ordered by how much they move the needle — at most MAX_TIPS are applied so
 // the card stays readable rather than becoming a lecture.
 const MAX_TIPS = 4;
+
+// How much of a thing a recipe actually contains.
+//
+// This exists because fixed deltas were wrong. Sugar in this repository ranges
+// from a teaspoon to a cup and a half — a seventy-fold spread — so a flat
+// "halving the sugar saves 40g of carbs" turned a bowl of overnight oats into
+// a zero-carb dish. Rules that act on a measurable ingredient now derive their
+// delta from the quantity in front of them.
+//
+// Per-unit weights are ordinary kitchen approximations; `count` covers a null
+// unit, which in this data means a countable piece ("10 cashews").
+const GRAMS = {
+  sugar:  { tsp: 4, tbsp: 12, cup: 200, g: 1, ml: 1, pinch: 0.3, count: 4 },
+  fat:    { tsp: 4.5, tbsp: 14, cup: 218, g: 1, ml: 0.9, pinch: 0.3, count: 5 },
+  cream:  { tsp: 5, tbsp: 15, cup: 240, g: 1, ml: 1, count: 15 },
+  solid:  { tsp: 5, tbsp: 15, cup: 225, g: 1, ml: 1, count: 100 },
+  nuts:   { tsp: 3, tbsp: 8, cup: 130, g: 1, ml: 1, count: 1.4 },
+  liquid: { tsp: 5, tbsp: 15, cup: 240, g: 1, ml: 1, l: 1000, count: 400 },
+  cheese: { tsp: 2.5, tbsp: 7, cup: 110, g: 1, ml: 1, count: 30 },
+};
+
+const gramsOf = (rows, re, table) => (rows || []).reduce((sum, r) => {
+  if (!re.test(rowName(r).toLowerCase())) return sum;
+  const q = Number(r[0]);
+  if (!Number.isFinite(q) || q <= 0) return sum;
+  const unit = String(r[1] || "").toLowerCase();
+  return sum + q * (table[unit] ?? table.count);
+}, 0);
+
+// Rough per-gram figures for the swaps below, so a delta is arithmetic on a
+// real quantity rather than a guess.
+const PER_G = {
+  sugar:   { cal: 4, c: 1 },
+  fat:     { cal: 9, f: 1 },
+  cream:   { cal: 3.4, f: 0.37, p: 0.02 },
+  yogurt:  { cal: 0.6, f: 0.03, p: 0.10 },
+  paneer:  { cal: 3.1, f: 0.20, p: 0.18 },
+  tofu:    { cal: 1.4, f: 0.08, p: 0.17 },
+  cashew:  { cal: 5.5, f: 0.44, p: 0.18 },
+  coconut: { cal: 2.3, f: 0.24 },
+  coconutLight: { cal: 0.7, f: 0.06 },
+  cheese:  { cal: 4.0, f: 0.33, p: 0.25 },
+};
 
 const HEALTH_RULES = [
   {
@@ -220,10 +274,14 @@ const HEALTH_RULES = [
     label: "Hide a scoop of protein",
     // Only where a scoop genuinely disappears: sweets, and sweet or porridge-
     // like breakfasts. Stirring whey into a curry is not a serious suggestion.
-    test: ({ card, rows, text }) => card.mealType === "dessert"
-      || (card.mealType === "breakfast"
-          && (anyRow(rows, /\boats?\b|pancake|smoothie|porridge|banana|berries/)
-              || /pancake|smoothie|porridge|overnight oats|milkshake/.test(text))),
+    test: ({ card, rows, text }) => {
+      if (!["dessert", "breakfast"].includes(card.mealType)) return false;
+      // A shake takes a scoop; a cup of tea does not.
+      if (isDrink(card) && !/smoothie|milkshake|\bshake\b/i.test(card.name || "")) return false;
+      return isSweet(card, rows)
+        || anyRow(rows, /\boats?\b|pancake|porridge|banana|berries/)
+        || /pancake|smoothie|porridge|overnight oats|milkshake/.test(text);
+    },
     note: "Whisk in a scoop of unflavoured whey or soy protein with the dry ingredients. It disappears into the texture.",
     delta: { cal: 120, p: 25, c: -2, f: 2 },
     add: [1, "scoop", "unflavoured protein powder"],
@@ -235,8 +293,10 @@ const HEALTH_RULES = [
     // Only worth suggesting when the dish is actually short on protein.
     // Not on drinks, and not on anything too small to be a meal — a cup of
     // chickpeas belongs in a curry, not in a 60-calorie glass of lime soda.
-    test: ({ card, macros }) => proteinShare(macros) < 0.16 && macros.cal >= 150
-      && !isDrink(card) && !isCondiment(card),
+    // Never on anything sweet: the powder rule above owns those, and a cup of
+    // chickpeas on condensed-milk toast is not a suggestion anyone would take.
+    test: ({ card, rows, macros }) => proteinShare(macros) < 0.16 && macros.cal >= 150
+      && !isDrink(card) && !isCondiment(card) && !isSweet(card, rows),
     note: null, // filled in per cuisine below
     delta: { cal: 200, p: 25, c: 20, f: 6 },
     add: null,
@@ -245,10 +305,14 @@ const HEALTH_RULES = [
     id: "fat",
     group: "fat",
     label: "Cut the cooking fat",
-    test: ({ rows }) => (rows || []).some((r) => /ghee|butter|oil/.test(rowName(r).toLowerCase())
-      && /tbsp/.test(String(r[1] || "")) && Number(r[0]) >= 3),
+    // Gram-based rather than "a row with 3+ tbsp": two rows of two tablespoons
+    // each is the same amount of fat and was previously invisible.
+    test: ({ rows }) => gramsOf(rows, /\bghee\b|\bbutter\b|\boil\b/, GRAMS.fat) >= 40,
     note: "Drop the ghee or oil to a single tablespoon and use a non-stick pan. In a spiced dish you will not miss it.",
-    delta: { cal: -240, p: 0, c: 0, f: -27 },
+    deltaFor: (rows) => {
+      const excess = Math.max(0, gramsOf(rows, /\bghee\b|\bbutter\b|\boil\b/, GRAMS.fat) - 14);
+      return { cal: -excess * PER_G.fat.cal, p: 0, c: 0, f: -excess * PER_G.fat.f };
+    },
     rewrite: (rows) => (rows || []).map((r) =>
       /ghee|butter|oil/.test(rowName(r).toLowerCase()) && /tbsp/.test(String(r[1] || "")) && Number(r[0]) >= 3
         ? [1, r[1], r[2]] : r),
@@ -266,7 +330,17 @@ const HEALTH_RULES = [
     noteFor: (rows) => anyRow(rows, FAT_TRIM)
       ? "A third or more of the calories here are fat. Use half the oil or nuts and add them at the very end — you taste them more that way, so less goes further."
       : "A third or more of the calories here are fat, and it is coming from the dairy. Use low-fat milk, or two-thirds of the cream or mayo — the texture holds up better than you would expect.",
-    delta: { cal: -120, p: 0, c: 0, f: -14 },
+    deltaFor: (rows) => {
+      // Oils and nuts are weighed separately — a piece of one is not the
+      // weight of a piece of the other — and halved.
+      const trimmed = (gramsOf(rows, OIL_RE, GRAMS.fat) + gramsOf(rows, NUT_RE, GRAMS.nuts)) / 2;
+      // Dairy is swapped rather than cut, so it needs its own arithmetic:
+      // going from whole to low-fat removes roughly 2.5 g of fat per 100 g,
+      // which is the whole point on a milk sweet where the dairy IS the fat.
+      const dairy = gramsOf(rows, FAT_DAIRY, GRAMS.liquid) * 0.025;
+      const saved = trimmed + dairy;
+      return { cal: -saved * PER_G.fat.cal, p: 0, c: 0, f: -saved * PER_G.fat.f };
+    },
     // Only halve what can be halved; dairy gets swapped in the note instead.
     rewrite: (rows) => (rows || []).map((r) =>
       FAT_TRIM.test(rowName(r).toLowerCase()) && typeof r[0] === "number" && r[0] > 1
@@ -277,7 +351,15 @@ const HEALTH_RULES = [
     label: "Yogurt instead of cream",
     test: ({ rows }) => anyRow(rows, /(^|[^a-z])cream(?!\s*cheese)/),
     note: "Use thick Greek yogurt in place of the cream, stirred in off the heat so it cannot split.",
-    delta: { cal: -85, p: 2, c: 1, f: -9 },
+    deltaFor: (rows) => {
+      const g = gramsOf(rows, /(^|[^a-z])cream(?!\s*cheese)/, GRAMS.cream);
+      return {
+        cal: g * (PER_G.yogurt.cal - PER_G.cream.cal),
+        p: g * (PER_G.yogurt.p - PER_G.cream.p),
+        c: 0,
+        f: g * (PER_G.yogurt.f - PER_G.cream.f),
+      };
+    },
     rewrite: (rows) => mapRow(rows, /(^|[^a-z])cream(?!\s*cheese)/, (r) => [r[0], r[1], "thick Greek yogurt"]),
   },
   {
@@ -285,7 +367,15 @@ const HEALTH_RULES = [
     label: "Tofu for paneer",
     test: ({ rows }) => anyRow(rows, /paneer/),
     note: "Swap firm tofu for the paneer — press it 15 min first and it browns exactly the same way, for half the fat. (Paneer is no slouch on protein; this one is a calorie and fat win.)",
-    delta: { cal: -280, p: -2, c: -2, f: -22 },
+    deltaFor: (rows) => {
+      const g = gramsOf(rows, /paneer/, GRAMS.solid);
+      return {
+        cal: g * (PER_G.tofu.cal - PER_G.paneer.cal),
+        p: g * (PER_G.tofu.p - PER_G.paneer.p),
+        c: 0,
+        f: g * (PER_G.tofu.f - PER_G.paneer.f),
+      };
+    },
     rewrite: (rows) => mapRow(rows, /paneer/, (r) => [r[0], r[1], rowName(r).replace(/paneer/i, "firm tofu")]),
   },
   {
@@ -293,7 +383,15 @@ const HEALTH_RULES = [
     label: "Lose the cashew paste",
     test: ({ rows }) => (rows || []).some((r) => /cashew/.test(rowName(r).toLowerCase()) && Number(r[0]) >= 8),
     note: "Blend silken tofu instead of the cashews for the same silk with a fraction of the fat and more protein.",
-    delta: { cal: -30, p: 5, c: -3, f: -6 },
+    deltaFor: (rows) => {
+      const g = gramsOf(rows, /cashew/, GRAMS.nuts);
+      return {
+        cal: 55 - g * PER_G.cashew.cal,
+        p: 6 - g * PER_G.cashew.p,
+        c: 2,
+        f: 3 - g * PER_G.cashew.f,
+      };
+    },
     rewrite: (rows) => mapRow(rows, /cashew/, (r) => [100, "g", "silken tofu (for the paste)"]),
   },
   {
@@ -301,7 +399,14 @@ const HEALTH_RULES = [
     label: "Lighten the coconut milk",
     test: ({ rows }) => anyRow(rows, /coconut milk/),
     note: "Use light coconut milk, or cut full-fat with an equal part of stock. The spice carries the dish either way.",
-    delta: { cal: -220, p: 0, c: -4, f: -24 },
+    deltaFor: (rows) => {
+      const g = gramsOf(rows, /coconut milk/, GRAMS.liquid);
+      return {
+        cal: g * (PER_G.coconutLight.cal - PER_G.coconut.cal),
+        p: 0, c: 0,
+        f: g * (PER_G.coconutLight.f - PER_G.coconut.f),
+      };
+    },
     rewrite: (rows) => mapRow(rows, /coconut milk/, (r) => [r[0], r[1], "light coconut milk"]),
   },
   {
@@ -309,7 +414,10 @@ const HEALTH_RULES = [
     label: "Halve the sugar",
     test: ({ rows }) => anyRow(rows, /\bsugar\b|condensed milk|jaggery|honey|syrup/),
     note: "Halve the sugar and lean on cardamom, cinnamon or vanilla instead — the spice reads as sweetness.",
-    delta: { cal: -160, p: 0, c: -40, f: 0 },
+    deltaFor: (rows) => {
+      const saved = gramsOf(rows, /\bsugar\b|jaggery|honey|syrup|condensed milk/, GRAMS.sugar) / 2;
+      return { cal: -saved * PER_G.sugar.cal, p: 0, c: -saved * PER_G.sugar.c, f: 0 };
+    },
     rewrite: (rows) => mapRow(rows, /\bsugar\b|jaggery/, (r) =>
       (typeof r[0] === "number" ? [Math.round(r[0] * 50) / 100, r[1], r[2]] : r)),
   },
@@ -329,7 +437,13 @@ const HEALTH_RULES = [
     label: "Less cheese, grated finer",
     test: ({ rows }) => anyRow(rows, /cheese|mozzarella|cheddar|parmesan|feta/) && !anyRow(rows, /cottage cheese/),
     note: "Use two-thirds of the cheese but grate it finer — it still covers everything and you taste it just as much.",
-    delta: { cal: -150, p: -8, c: 0, f: -13 },
+    deltaFor: (rows) => {
+      const saved = gramsOf(rows, /cheese|mozzarella|cheddar|parmesan|feta/, GRAMS.cheese) / 3;
+      return {
+        cal: -saved * PER_G.cheese.cal, p: -saved * PER_G.cheese.p,
+        c: 0, f: -saved * PER_G.cheese.f,
+      };
+    },
     // Costs protein, so it is dropped again below if it would leave the dish
     // less protein-dense than it started.
     mayCostProtein: true,
@@ -399,23 +513,47 @@ function healthify(card) {
       note = pick.note; add = pick.row;
     }
     if (rule.group) usedGroups.add(rule.group);
-    picked.push({ rule, note, add });
+    // A rule that acts on a measurable ingredient computes its delta from the
+    // quantity actually present; the rest carry a fixed one.
+    let delta = rule.delta;
+    if (rule.deltaFor) {
+      try { delta = rule.deltaFor(rows); } catch { delta = rule.delta || {}; }
+    }
+    picked.push({ rule, note, add, delta });
   }
 
   // Rounded exactly as the card will display them, so the checks below judge
   // the numbers the user actually sees rather than the raw arithmetic.
+  //
+  // And bounded. The two halves of this calculation do not share a source of
+  // truth: a recipe's macros are hand-authored per serving, while the deltas
+  // above are derived from the ingredient list. Where the authored figure
+  // under-counts what the ingredients imply, a stack of derived subtractions
+  // outruns what it can absorb — which is how swapping the paneer, the cream
+  // and half the oil turned a 380-calorie palak paneer into a 130-calorie one.
+  // The swaps are still right; the arithmetic just cannot be trusted to the
+  // last calorie, so no set of suggestions may claim to remove more than half
+  // the calories or three-quarters of the fat.
+  // The bounds are proportions of the dish's own figures, with no absolute
+  // minimum: an absolute floor of 80 calories both invented calories for a
+  // 70-calorie drink and then pinned it there, so cutting its honey changed
+  // nothing on screen.
+  const CAL_FLOOR = 0.5, FAT_FLOOR = 0.25;
   const round = (m) => ({
-    cal: Math.max(Math.min(80, macros.cal), Math.round(m.cal)),
-    p: Math.max(Math.min(1, macros.p), Math.round(m.p)),
+    cal: Math.round(Math.max(macros.cal * CAL_FLOOR, m.cal)),
+    p: Math.max(0, Math.round(m.p)),
     c: Math.max(0, Math.round(m.c)),
-    f: Math.max(Math.min(1, macros.f), Math.round(m.f)),
+    f: Math.round(Math.max(macros.f * FAT_FLOOR, m.f)),
   });
-  const totals = (list) => list.reduce((acc, { rule }) => ({
-    cal: acc.cal + (rule.delta.cal || 0) / serves,
-    p: acc.p + (rule.delta.p || 0) / serves,
-    c: acc.c + (rule.delta.c || 0) / serves,
-    f: acc.f + (rule.delta.f || 0) / serves,
-  }), { ...macros });
+  const totals = (list) => list.reduce((acc, { rule, delta }) => {
+    const d = delta || rule.delta || {};
+    return {
+      cal: acc.cal + (d.cal || 0) / serves,
+      p: acc.p + (d.p || 0) / serves,
+      c: acc.c + (d.c || 0) / serves,
+      f: acc.f + (d.f || 0) / serves,
+    };
+  }, { ...macros });
 
   let applied = picked;
 
@@ -441,8 +579,15 @@ function healthify(card) {
       rule: fatRule,
       note: fatRule.noteFor ? fatRule.noteFor(rows) : fatRule.note,
       add: fatRule.add,
+      delta: fatRule.deltaFor ? fatRule.deltaFor(rows) : fatRule.delta,
     }].slice(0, MAX_TIPS);
   }
+
+  applied = applied.filter(({ rule, delta }) => {
+    if (!rule.deltaFor) return true;
+    const d = delta || {};
+    return Math.abs(d.cal || 0) >= 5 || Math.abs(d.p || 0) >= 1 || Math.abs(d.f || 0) >= 1;
+  });
 
   for (const { rule, note, add } of applied) {
     tips.push({ id: rule.id, label: rule.label, note });
@@ -471,7 +616,7 @@ function healthify(card) {
   // a protein shake. Past ~55% of calories from protein the arithmetic has
   // drifted, so pull it back rather than printing a number nobody believes.
   const cap = Math.floor((next.cal * 0.55) / 4);
-  if (next.p > cap) next.p = Math.max(Math.min(1, macros.p), cap);
+  if (next.p > cap) next.p = Math.max(0, cap);
 
   return { already, tips, macros: next, before: macros, ingFull: nextRows };
 }
@@ -3188,7 +3333,12 @@ function HealthPanel({ health }) {
       <div style={{ fontSize: 12, fontWeight: 800, color: already ? C.green : C.purple }}>
         {already
           ? "Already high-protein and light — nothing to fix"
-          : "Lighter, higher-protein version"}
+          // Adding a protein source can cost calories. Trading 96 of them for
+          // 25 g of protein is a good deal, but calling the result "lighter"
+          // when the number went up would be a lie.
+          : dCal > 0
+            ? "Higher-protein version — costs a few calories"
+            : "Lighter, higher-protein version"}
       </div>
       {tips.map((t) => (
         <div key={t.id} style={{ fontSize: 12.5, lineHeight: 1.45, color: C.ink }}>
