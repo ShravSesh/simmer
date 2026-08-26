@@ -1460,14 +1460,28 @@ export default function Simmer() {
     }
   }, [tab, pantry, deck.length, exhausted, mode, cuisines, maxTime, mealType]);
 
-  // Turning eggs off has to reach cards that were already dealt. Filtering the
-  // pool only governs the *next* deal, so without this an egg recipe stays on
-  // screen until it is swiped, and undo could even bring one back. Emptying the
-  // deck here lets the effect above re-deal from the now-filtered pool.
+  // Flipping the egg toggle has to reach cards that were already dealt, in both
+  // directions. Filtering the pool only governs the *next* deal: turning eggs
+  // off would otherwise leave an egg recipe on screen until it was swiped (and
+  // undo could bring one back), and turning eggs on would show nothing new
+  // until the deck happened to run out. So the deck is thrown away and re-dealt
+  // from the current pool either way.
+  //
+  // The ref guard keeps this from firing on the first render, when `diet` is
+  // merely arriving from storage rather than being changed by anyone — that
+  // would discard a freshly dealt deck for no reason.
+  const dietSeenRef = useRef(null);
   useEffect(() => {
-    if (diet === "eggs") return;
-    setDeck((d) => (d.some(usesEgg) ? d.filter((c) => !usesEgg(c)) : d));
-    setHistory((h) => (h.some((e) => usesEgg(e.card)) ? h.filter((e) => !usesEgg(e.card)) : h));
+    const prev = dietSeenRef.current;
+    dietSeenRef.current = diet;
+    if (prev === null || prev === diet) return;
+
+    // Undo history is dropped rather than filtered: after a re-deal the cards
+    // it refers to are no longer in the deck, so restoring one would put back a
+    // card the new pool may not even contain.
+    setHistory((h) => h.filter((e) => !usesEgg(e.card)));
+    setDeck([]);
+    setExhausted(null);
   }, [diet]);
 
   const handleSwipe = useCallback(
@@ -3455,6 +3469,137 @@ function scaledIng(m, serves) {
    Rendered days-down rather than days-across: three meal columns fit a
    phone, seven day columns do not. Same grid, turned ninety degrees.
    ================================================================== */
+
+// Escaping is not optional here: recipe names and steps are interpolated into
+// a document, and household-added recipes are user-written text.
+const esc = (v) => String(v ?? "")
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+
+// One printable document for a plan: the week as a table, then every recipe in
+// it written out below with ingredients and method.
+//
+// Rendered as plain HTML with inline styles because that is the one format
+// both targets accept — a browser prints it to PDF, and Word opens it as a
+// document. No library, nothing fetched.
+function buildPrepDoc({ plan, span, meals, dayLabel, kidsOnly }) {
+  const cellKey = (d, meal) => `${d}:${meal}`;
+  const rows = Array.from({ length: span }, (_, d) => d);
+
+  // Each distinct recipe once, in the order it first appears in the week, so
+  // the reader can follow the table straight down into the recipes.
+  const seen = new Set();
+  const recipes = [];
+  for (const d of rows) {
+    for (const meal of meals) {
+      const r = plan[cellKey(d, meal)];
+      if (!r || seen.has(r.name)) continue;
+      seen.add(r.name);
+      recipes.push(r);
+    }
+  }
+
+  const th = 'style="border:1px solid #999;padding:7px 9px;background:#EFEFE9;font-size:11pt;text-align:left"';
+  const td = 'style="border:1px solid #999;padding:7px 9px;font-size:11pt;vertical-align:top"';
+
+  const table = `
+    <table style="border-collapse:collapse;width:100%">
+      <tr>
+        <th ${th}>Day</th>
+        ${meals.map((m) => `<th ${th}>${esc(m[0].toUpperCase() + m.slice(1))}</th>`).join("")}
+      </tr>
+      ${rows.map((d) => `
+      <tr>
+        <td ${td}><b>${esc(dayLabel(d))}</b></td>
+        ${meals.map((m) => {
+          const r = plan[cellKey(d, m)];
+          if (!r) return `<td ${td}><i style="color:#888">—</i></td>`;
+          const meta = [r.minutes ? `${r.minutes} min` : null, r.macros ? `${r.macros.cal} cal` : null]
+            .filter(Boolean).join(" · ");
+          return `<td ${td}>${esc(r.name)}${meta ? `<br><span style="font-size:9pt;color:#666">${esc(meta)}</span>` : ""}</td>`;
+        }).join("")}
+      </tr>`).join("")}
+    </table>`;
+
+  const body = recipes.map((r) => {
+    const ings = scaledIng(r, r.serves || 2);
+    const meta = [
+      r.cuisine, r.minutes ? `${r.minutes} min` : null, `serves ${r.serves || 2}`,
+      r.macros ? `${r.macros.cal} cal · ${r.macros.p}g protein per serving` : null,
+    ].filter(Boolean).join(" · ");
+    return `
+      <h2 style="font-size:13pt;margin:20pt 0 2pt">${esc(r.name)}</h2>
+      <p style="font-size:9.5pt;color:#666;margin:0 0 7pt">${esc(meta)}</p>
+      ${r.desc ? `<p style="font-size:10.5pt;margin:0 0 7pt">${esc(r.desc)}</p>` : ""}
+      <p style="font-size:9.5pt;font-weight:bold;margin:0 0 3pt">Ingredients</p>
+      <ul style="margin:0 0 8pt;padding-left:16pt;font-size:10.5pt">
+        ${ings.map((l) => `<li>${esc(l)}</li>`).join("")}
+      </ul>
+      <p style="font-size:9.5pt;font-weight:bold;margin:0 0 3pt">Method</p>
+      <ol style="margin:0;padding-left:16pt;font-size:10.5pt">
+        ${(r.steps || []).map((st) => `<li style="margin-bottom:3pt">${esc(st)}</li>`).join("")}
+      </ol>`;
+  }).join("");
+
+  const title = `Meal prep — ${span} days${kidsOnly ? ", kid-friendly" : ""}`;
+
+  // The xmlns declarations are what make Word treat this as a document rather
+  // than a web page it happens to be able to open.
+  return `<!DOCTYPE html>
+<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
+<head><meta charset="utf-8"><title>${esc(title)}</title>
+<style>
+  @page { size: A4; margin: 18mm; }
+  body { font-family: Georgia, 'Times New Roman', serif; color: #1E2B20; }
+  h1 { font-size: 17pt; margin: 0 0 3pt; }
+  h2 { page-break-after: avoid; }
+  ul, ol { page-break-inside: avoid; }
+  table { page-break-inside: avoid; }
+</style></head>
+<body>
+  <h1>${esc(title)}</h1>
+  <p style="font-size:9.5pt;color:#666;margin:0 0 14pt">From Simmer${kidsOnly ? " · kid-friendly recipes only" : ""}</p>
+  ${table}
+  <h1 style="font-size:14pt;margin:26pt 0 0">Recipes</h1>
+  ${body}
+</body></html>`;
+}
+
+// Print path. Rendered into a hidden same-page iframe rather than a popup:
+// a popup blocker silently kills window.open, and the iframe prints the same.
+function printDoc(html) {
+  const frame = document.createElement("iframe");
+  frame.setAttribute("aria-hidden", "true");
+  Object.assign(frame.style, {
+    position: "fixed", right: 0, bottom: 0, width: 0, height: 0, border: 0,
+  });
+  document.body.appendChild(frame);
+  const clean = () => setTimeout(() => frame.remove(), 1000);
+  frame.onload = () => {
+    try {
+      frame.contentWindow.focus();
+      frame.contentWindow.print();
+    } catch (e) {
+      console.warn("print blocked:", e);
+    }
+    clean();
+  };
+  frame.srcdoc = html;
+}
+
+// Download path. Word opens HTML served as .doc, which is why the document is
+// built as HTML in the first place.
+function downloadDoc(html, filename) {
+  const blob = new Blob(["﻿", html], { type: "application/msword" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
 const PREP_MEALS = ["breakfast", "lunch", "dinner"];
 const DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const PREP_SPANS = [3, 5, 7];
@@ -3466,15 +3611,23 @@ function MealPrepTab({ pantry, staples, allRecipes, mode }) {
   const [cellFilters, setCellFilters] = useState({});
   const [openKey, setOpenKey] = useState(null);
   const [filterKey, setFilterKey] = useState(null);
+  const [kidsOnly, setKidsOnly] = useState(false);
   const seenRef = useRef({});
   const { toast, setToast, showToast } = useToast();
+
+  // Kids mode narrows the pool to the recipes tagged kid-friendly, which is
+  // the whole prep book plus everything it already covered.
+  const pool = React.useMemo(
+    () => (kidsOnly ? allRecipes.filter((r) => r.kid) : allRecipes),
+    [allRecipes, kidsOnly],
+  );
 
   const cellKey = (d, meal) => `${d}:${meal}`;
   const dayLabel = (d) => DAY_NAMES[(startDay + d) % 7];
 
   // One pick for one slot. `used` keeps the week from repeating itself.
   const pickFor = useCallback((meal, used, filter = {}) => {
-    const [hit] = pickFromRepo(allRecipes, {
+    const [hit] = pickFromRepo(pool, {
       pantry: pantry || [], staples: staples || [], mode,
       exclude: used, swipes: [],
       cuisines: filter.cuisines || [],
@@ -3482,7 +3635,7 @@ function MealPrepTab({ pantry, staples, allRecipes, mode }) {
       mealType: meal, count: 1,
     });
     return hit || null;
-  }, [allRecipes, pantry, staples, mode]);
+  }, [pool, pantry, staples, mode]);
 
   // Fill every empty slot, leaving anything already there alone.
   const fillPlan = useCallback((keep = {}, days = span, filters = cellFilters) => {
@@ -3550,7 +3703,26 @@ function MealPrepTab({ pantry, staples, allRecipes, mode }) {
 
   const reshuffle = () => { seenRef.current = {}; setPlan(fillPlan({})); };
 
+  // A plan built from the full corpus is not a kids plan, and vice versa, so
+  // the toggle rebuilds rather than filtering what is already there.
+  const kidsSeenRef = useRef(kidsOnly);
+  useEffect(() => {
+    if (kidsSeenRef.current === kidsOnly) return;
+    kidsSeenRef.current = kidsOnly;
+    seenRef.current = {};
+    setPlan({});
+  }, [kidsOnly]);
+
   const open = openKey ? plan[openKey] : null;
+
+  const exportDoc = (how) => {
+    const filled = Object.values(plan).filter(Boolean).length;
+    if (!filled) { showToast("Nothing planned yet"); return; }
+    const html = buildPrepDoc({ plan, span, meals: PREP_MEALS, dayLabel, kidsOnly });
+    if (how === "print") { printDoc(html); return; }
+    downloadDoc(html, `simmer-meal-prep-${span}-days.doc`);
+    showToast("Word document downloaded");
+  };
 
   if (!pantry?.length) {
     return (
@@ -3579,8 +3751,21 @@ function MealPrepTab({ pantry, staples, allRecipes, mode }) {
             fontWeight: 800, fontSize: 13, cursor: "pointer",
           }}>{n} days</button>
         ))}
+        <button
+          onClick={() => setKidsOnly((v) => !v)}
+          aria-pressed={kidsOnly}
+          title={kidsOnly ? "Kid-friendly recipes only" : "All recipes"}
+          style={{
+            marginLeft: "auto",
+            border: `1.5px solid ${kidsOnly ? C.gold : C.line}`,
+            background: kidsOnly ? C.goldSoft : "#fff",
+            color: kidsOnly ? "#9A6700" : C.faint,
+            borderRadius: 99, padding: "6px 12px", fontFamily: "inherit",
+            fontWeight: 800, fontSize: 12, cursor: "pointer",
+          }}
+        >🧒 Kids</button>
         <button onClick={reshuffle} style={{
-          marginLeft: "auto", border: `1.5px solid ${C.line}`, background: "#fff",
+          border: `1.5px solid ${C.line}`, background: "#fff",
           color: C.faint, borderRadius: 99, padding: "6px 12px",
           fontFamily: "inherit", fontWeight: 700, fontSize: 12, cursor: "pointer",
         }}>🔄 Reshuffle</button>
@@ -3597,6 +3782,12 @@ function MealPrepTab({ pantry, staples, allRecipes, mode }) {
             fontWeight: 700, fontSize: 11.5, cursor: "pointer",
           }}>{d}</button>
         ))}
+      </div>
+
+      <div style={{ display: "flex", gap: 6, marginBottom: 10, alignItems: "center" }}>
+        <span style={{ fontSize: 11, color: C.faint, fontWeight: 700 }}>Export</span>
+        <button onClick={() => exportDoc("print")} style={exportBtn}>🖨 PDF</button>
+        <button onClick={() => exportDoc("word")} style={exportBtn}>📄 Word</button>
       </div>
 
       <p style={{ fontSize: 11, color: C.faint, margin: "0 0 8px", lineHeight: 1.5 }}>
@@ -3831,6 +4022,12 @@ function PrepRecipeSheet({ recipe, onClose }) {
     </div>
   );
 }
+
+const exportBtn = {
+  border: `1.5px solid ${C.line}`, background: "#fff", color: C.ink,
+  borderRadius: 99, padding: "5px 12px", fontFamily: "inherit",
+  fontWeight: 700, fontSize: 12, cursor: "pointer",
+};
 
 const stepBtn = {
   border: `1.5px solid ${C.line}`, background: "#fff", color: C.ink,
